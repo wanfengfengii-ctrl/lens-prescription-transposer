@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { transposePrescription } from "../api";
-import { RejectionError, TransposeResponse } from "../types";
+import { transposePrescription, verifyEntry } from "../api";
+import { RejectionError, TransposeResponse, VerifyEntryResponse } from "../types";
 
 function fakeResponse(status: number, body: unknown): Response {
   return {
@@ -92,5 +92,70 @@ describe("transposePrescription", () => {
       }),
     );
     await expect(transposePrescription(REQUEST)).rejects.toThrow("无法连接核对服务");
+  });
+});
+
+describe("verifyEntry", () => {
+  const VERIFY_REQUEST = {
+    prescription: REQUEST,
+    entry: {
+      right: { S: "+3.00", C: "-2.00", A: "120" },
+      left: { S: "-1.25", C: "-0.50", A: "85" },
+    },
+  };
+
+  const MATCH_BODY: VerifyEntryResponse = { match: true, differences: [] };
+
+  it("成功时返回比对结论，并携带原转置请求与录入值", async () => {
+    const fetchMock = vi.fn(async () => fakeResponse(200, MATCH_BODY));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const res = await verifyEntry(VERIFY_REQUEST);
+
+    expect(res).toEqual(MATCH_BODY);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/v1/verify-entry");
+    expect(init.method).toBe("POST");
+    expect(JSON.parse(String(init.body))).toEqual(VERIFY_REQUEST);
+  });
+
+  it("不吻合时返回逐字段差异", async () => {
+    const body: VerifyEntryResponse = {
+      match: false,
+      differences: [
+        { eye: "right", field: "S", expected: "+3.00", entered: "+3.25" },
+      ],
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => fakeResponse(200, body)));
+
+    const res = await verifyEntry(VERIFY_REQUEST);
+    expect(res.match).toBe(false);
+    expect(res.differences).toHaveLength(1);
+    expect(res.differences[0]).toEqual({
+      eye: "right",
+      field: "S",
+      expected: "+3.00",
+      entered: "+3.25",
+    });
+  });
+
+  it("录入不合法 → 422 抛出 RejectionError 并保留原因", async () => {
+    const reasons = ["复核录入.右眼.S: 必须是十进制定点数（不接受科学计数法），收到 '1e0'"];
+    vi.stubGlobal("fetch", vi.fn(async () => fakeResponse(422, { detail: reasons })));
+
+    const err = await verifyEntry(VERIFY_REQUEST).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RejectionError);
+    expect((err as RejectionError).reasons).toEqual(reasons);
+  });
+
+  it("网络不可达时抛出连接错误", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    await expect(verifyEntry(VERIFY_REQUEST)).rejects.toThrow("无法连接核对服务");
   });
 });

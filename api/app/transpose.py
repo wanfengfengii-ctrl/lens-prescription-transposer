@@ -204,8 +204,8 @@ def _eye_payload(t: EyeTransposition) -> dict[str, Any]:
     }
 
 
-def transpose_prescription(raw: Any) -> dict[str, Any]:
-    """整张处方转置。
+def _validate_and_transpose(raw: Any) -> tuple[str, dict[str, EyeTransposition]]:
+    """校验整张处方并完成双眼转置，返回 (目标记法, 双眼转置结果)。
 
     任一眼不合规（含转置后 S' 超界）即抛 PrescriptionError，
     由 API 层映射为 422，且不输出任何一眼的结果。
@@ -236,8 +236,77 @@ def transpose_prescription(raw: Any) -> dict[str, Any]:
     if errors:
         raise PrescriptionError(errors)
 
+    return target, results
+
+
+def transpose_prescription(raw: Any) -> dict[str, Any]:
+    """整张处方转置（校验与原子性见 _validate_and_transpose）。"""
+    target, results = _validate_and_transpose(raw)
     return {
         "target": target,
         "right": _eye_payload(results["right"]),
         "left": _eye_payload(results["left"]),
     }
+
+
+def verify_entry(raw: Any) -> dict[str, Any]:
+    """双眼录入复核：操作员把磨片参数抄入设备后再次录入，逐字段比对。
+
+    请求体：{"prescription": 原转置请求, "entry": {"right": {...}, "left": {...}}}。
+    复用现有校验与整数转置逻辑重算期望值；原处方或录入值不合规
+    任一项即整次复核 422。全部合法时逐字段比较（四分之一屈光度整数
+    比较，无浮点误差），返回整单是否吻合及每处差异的眼别、字段、
+    期望值与录入值。
+    """
+    if not isinstance(raw, dict):
+        raise PrescriptionError(["请求体必须是包含 prescription、entry 的对象"])
+    if "prescription" not in raw:
+        raise PrescriptionError(["prescription: 缺少必填字段（原转置请求）"])
+    if "entry" not in raw:
+        raise PrescriptionError(["entry: 缺少必填字段（双眼录入值）"])
+
+    # 原处方不合规 → 整次复核拒绝（与 /api/v1/transpose 同一套校验）
+    _, results = _validate_and_transpose(raw["prescription"])
+
+    entry = raw["entry"]
+    if not isinstance(entry, dict):
+        raise PrescriptionError(["entry: 必须是包含 right、left 的对象"])
+
+    errors: list[str] = []
+    entered: dict[str, EyeInput] = {}
+    for key, label in (("right", "复核录入.右眼"), ("left", "复核录入.左眼")):
+        try:
+            entered[key] = validate_eye(entry.get(key), label)
+        except PrescriptionError as exc:
+            errors.extend(exc.errors)
+    if errors:
+        raise PrescriptionError(errors)
+
+    differences: list[dict[str, Any]] = []
+    for key in ("right", "left"):
+        expected = results[key]
+        got = entered[key]
+        for field, exp_q, got_q in (
+            ("S", expected.out_s_q, got.s_q),
+            ("C", expected.out_c_q, got.c_q),
+        ):
+            if got_q != exp_q:
+                differences.append(
+                    {
+                        "eye": key,
+                        "field": field,
+                        "expected": fmt(exp_q),
+                        "entered": fmt(got_q),
+                    }
+                )
+        if got.axis != expected.out_axis:
+            differences.append(
+                {
+                    "eye": key,
+                    "field": "A",
+                    "expected": expected.out_axis,
+                    "entered": got.axis,
+                }
+            )
+
+    return {"match": not differences, "differences": differences}

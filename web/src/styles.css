@@ -27,7 +27,8 @@ h1 {
 
 form,
 .result,
-.rejection {
+.rejection,
+.verify {
   background: #fff;
   border: 1px solid #dde3ea;
   border-radius: 8px;
@@ -166,4 +167,40 @@ th {
   font-size: 1rem;
   line-height: 1.7;
   overflow-x: auto;
+}
+
+.verify {
+  border-color: #b9c4cf;
+}
+
+.verify h2 {
+  margin-top: 0;
+}
+
+.diff {
+  margin: 4px 0 0 calc(7.5em + 10px);
+  color: #c93036;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+input[aria-invalid="true"] {
+  border-color: #e5484d;
+  background: #fff5f5;
+}
+
+.verify-status {
+  font-size: 1.05rem;
+  padding: 10px 14px;
+  border-radius: 6px;
+}
+
+.verify-status.pass {
+  background: #ecfdf3;
+  border: 1px solid #1a7f37;
+}
+
+.verify-status.fail {
+  background: #fff5f5;
+  border: 1px solid #e5484d;
 }

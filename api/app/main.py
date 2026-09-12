@@ -6,7 +6,7 @@ from typing import Any
 from fastapi import Body, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .transpose import PrescriptionError, transpose_prescription
+from .transpose import PrescriptionError, transpose_prescription, verify_entry
 
 app = FastAPI(title="眼镜处方柱镜记法转置核对 API", version="1.0.0")
 
@@ -29,5 +29,18 @@ def transpose(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
     """单次提交双眼 S/C/A 与目标记法；任一眼不合规即整单 422。"""
     try:
         return transpose_prescription(payload)
+    except PrescriptionError as exc:
+        raise HTTPException(status_code=422, detail=exc.errors) from exc
+
+
+@app.post("/api/v1/verify-entry")
+def verify(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    """双眼录入复核：携带原转置请求与录入值，逐字段比对。
+
+    原处方或录入值不合规即整次 422；全部合法时返回整单是否吻合
+    以及每处差异的眼别、字段、期望值与录入值。
+    """
+    try:
+        return verify_entry(payload)
     except PrescriptionError as exc:
         raise HTTPException(status_code=422, detail=exc.errors) from exc

@@ -1,6 +1,17 @@
-import { ChangeEvent, FormEvent, useState } from "react";
-import { EyePayload, transposePrescription } from "./api";
-import { EyeResult, RejectionError, TransposeResponse } from "./types";
+import { ChangeEvent, FormEvent, Fragment, useState } from "react";
+import {
+  EyePayload,
+  TransposeRequest,
+  transposePrescription,
+  verifyEntry,
+} from "./api";
+import {
+  EntryDifference,
+  EyeResult,
+  RejectionError,
+  TransposeResponse,
+  VerifyEntryResponse,
+} from "./types";
 
 const EMPTY_EYE: EyePayload = { S: "", C: "", A: "" };
 
@@ -12,16 +23,51 @@ export default function App() {
   const [rejection, setRejection] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // 生成当前磨片参数的那次转置请求（复核时原样携带）
+  const [lastRequest, setLastRequest] = useState<TransposeRequest | null>(null);
+  const [entryRight, setEntryRight] = useState<EyePayload>({ ...EMPTY_EYE });
+  const [entryLeft, setEntryLeft] = useState<EyePayload>({ ...EMPTY_EYE });
+  const [verify, setVerify] = useState<VerifyEntryResponse | null>(null);
+  const [verifyRejection, setVerifyRejection] = useState<string[] | null>(null);
+  const [verifyBusy, setVerifyBusy] = useState(false);
+
+  // 修改原处方或目标记法 → 旧复核结论立即作废
+  function clearVerifyConclusion() {
+    setVerify(null);
+    setVerifyRejection(null);
+  }
+
+  const onTargetChange = (t: "minus" | "plus") => {
+    setTarget(t);
+    clearVerifyConclusion();
+  };
+  const onRightChange = (v: EyePayload) => {
+    setRight(v);
+    clearVerifyConclusion();
+  };
+  const onLeftChange = (v: EyePayload) => {
+    setLeft(v);
+    clearVerifyConclusion();
+  };
+
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setBusy(true);
+    clearVerifyConclusion();
     try {
-      const rx = await transposePrescription({ target, right, left });
+      const req: TransposeRequest = {
+        target,
+        right: { ...right },
+        left: { ...left },
+      };
+      const rx = await transposePrescription(req);
       setResult(rx);
+      setLastRequest(req);
       setRejection(null);
     } catch (err) {
       // 任一眼不合规 → 整单拒绝：清空全部残留加工值，只展示拒绝原因
       setResult(null);
+      setLastRequest(null);
       setRejection(
         err instanceof RejectionError
           ? err.reasons
@@ -29,6 +75,31 @@ export default function App() {
       );
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function onVerifySubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!lastRequest) return;
+    setVerifyBusy(true);
+    try {
+      const res = await verifyEntry({
+        prescription: lastRequest,
+        entry: { right: entryRight, left: entryLeft },
+      });
+      setVerify(res);
+      setVerifyRejection(null);
+    } catch (err) {
+      // 录入不合法 → 整次复核 422：保留已生成的磨片参数，
+      // 移除过期复核结论，只显示本次拒绝原因
+      setVerify(null);
+      setVerifyRejection(
+        err instanceof RejectionError
+          ? err.reasons
+          : [err instanceof Error ? err.message : String(err)],
+      );
+    } finally {
+      setVerifyBusy(false);
     }
   }
 
@@ -47,7 +118,7 @@ export default function App() {
           <select
             id="target"
             value={target}
-            onChange={(e) => setTarget(e.target.value as "minus" | "plus")}
+            onChange={(e) => onTargetChange(e.target.value as "minus" | "plus")}
           >
             <option value="minus">负柱镜记法</option>
             <option value="plus">正柱镜记法</option>
@@ -55,8 +126,8 @@ export default function App() {
         </div>
 
         <div className="eyes">
-          <EyeFieldset legend="右眼（OD）" side="右眼" prefix="right" value={right} onChange={setRight} />
-          <EyeFieldset legend="左眼（OS）" side="左眼" prefix="left" value={left} onChange={setLeft} />
+          <EyeFieldset legend="右眼（OD）" side="右眼" prefix="right" value={right} onChange={onRightChange} />
+          <EyeFieldset legend="左眼（OS）" side="左眼" prefix="left" value={left} onChange={onLeftChange} />
         </div>
 
         <button type="submit" disabled={busy}>
@@ -77,16 +148,29 @@ export default function App() {
       )}
 
       {result && (
-        <section aria-label="核对结果" className="result">
-          <h2>
-            核对结果（{result.target === "minus" ? "负柱镜记法" : "正柱镜记法"}）
-          </h2>
-          <div className="eyes">
-            <EyeResultCard title="右眼（OD）" eye={result.right} />
-            <EyeResultCard title="左眼（OS）" eye={result.left} />
-          </div>
-          <GrindingOrder result={result} />
-        </section>
+        <Fragment>
+          <section aria-label="核对结果" className="result">
+            <h2>
+              核对结果（{result.target === "minus" ? "负柱镜记法" : "正柱镜记法"}）
+            </h2>
+            <div className="eyes">
+              <EyeResultCard title="右眼（OD）" eye={result.right} />
+              <EyeResultCard title="左眼（OS）" eye={result.left} />
+            </div>
+            <GrindingOrder result={result} />
+          </section>
+
+          <VerifyEntrySection
+            right={entryRight}
+            left={entryLeft}
+            onRightChange={setEntryRight}
+            onLeftChange={setEntryLeft}
+            onSubmit={onVerifySubmit}
+            busy={verifyBusy}
+            verify={verify}
+            rejection={verifyRejection}
+          />
+        </Fragment>
       )}
     </main>
   );
@@ -98,46 +182,138 @@ function EyeFieldset(props: {
   prefix: string;
   value: EyePayload;
   onChange: (v: EyePayload) => void;
+  /** 复核场景：该眼的逐字段差异，非空时标在对应字段旁 */
+  differences?: EntryDifference[];
+  eyeKey?: "right" | "left";
+  /** 自定义字段标签（复核区使用，避免与主表单标签互为子串） */
+  fieldLabels?: { S: string; C: string; A: string };
 }) {
-  const { legend, side, prefix, value, onChange } = props;
+  const { legend, side, prefix, value, onChange, differences, eyeKey, fieldLabels } =
+    props;
   const bind =
     (key: keyof EyePayload) => (e: ChangeEvent<HTMLInputElement>) =>
       onChange({ ...value, [key]: e.target.value });
+  const diffOf = (key: keyof EyePayload) =>
+    eyeKey && differences
+      ? differences.find((d) => d.eye === eyeKey && d.field === key)
+      : undefined;
+
+  const field = (
+    key: keyof EyePayload,
+    label: string,
+    placeholder: string,
+    inputMode: "decimal" | "numeric",
+  ) => {
+    const diff = diffOf(key);
+    const id = `${prefix}-${key.toLowerCase()}`;
+    return (
+      <Fragment key={key}>
+        <div className="field">
+          <label htmlFor={id}>{label}</label>
+          <input
+            id={id}
+            inputMode={inputMode}
+            placeholder={placeholder}
+            value={value[key]}
+            onChange={bind(key)}
+            aria-invalid={diff ? true : undefined}
+            aria-describedby={diff ? `${id}-diff` : undefined}
+          />
+        </div>
+        {diff && (
+          <p
+            className="diff"
+            id={`${id}-diff`}
+            data-testid={`diff-${eyeKey}-${key}`}
+          >
+            不吻合：期望 {diff.expected}，录入 {diff.entered}
+          </p>
+        )}
+      </Fragment>
+    );
+  };
 
   return (
     <fieldset>
       <legend>{legend}</legend>
-      <div className="field">
-        <label htmlFor={`${prefix}-s`}>{side} S（球镜）</label>
-        <input
-          id={`${prefix}-s`}
-          inputMode="decimal"
-          placeholder="+1.25"
-          value={value.S}
-          onChange={bind("S")}
-        />
-      </div>
-      <div className="field">
-        <label htmlFor={`${prefix}-c`}>{side} C（柱镜）</label>
-        <input
-          id={`${prefix}-c`}
-          inputMode="decimal"
-          placeholder="-0.75"
-          value={value.C}
-          onChange={bind("C")}
-        />
-      </div>
-      <div className="field">
-        <label htmlFor={`${prefix}-a`}>{side} A（轴位）</label>
-        <input
-          id={`${prefix}-a`}
-          inputMode="numeric"
-          placeholder="1–180，C 为 0 时填 0"
-          value={value.A}
-          onChange={bind("A")}
-        />
-      </div>
+      {field("S", fieldLabels?.S ?? `${side} S（球镜）`, "+1.25", "decimal")}
+      {field("C", fieldLabels?.C ?? `${side} C（柱镜）`, "-0.75", "decimal")}
+      {field("A", fieldLabels?.A ?? `${side} A（轴位）`, "1–180，C 为 0 时填 0", "numeric")}
     </fieldset>
+  );
+}
+
+/** 双眼录入复核：仅在成功生成磨片参数后展示 */
+function VerifyEntrySection(props: {
+  right: EyePayload;
+  left: EyePayload;
+  onRightChange: (v: EyePayload) => void;
+  onLeftChange: (v: EyePayload) => void;
+  onSubmit: (e: FormEvent<HTMLFormElement>) => void;
+  busy: boolean;
+  verify: VerifyEntryResponse | null;
+  rejection: string[] | null;
+}) {
+  const { right, left, onRightChange, onLeftChange, onSubmit, busy, verify, rejection } =
+    props;
+  return (
+    <section aria-label="双眼录入复核" className="verify">
+      <h2>双眼录入复核</h2>
+      <p className="hint">
+        磨片参数抄入设备后，请将设备中的双眼 S / C / A 再次录入并提交复核，
+        确认没有串眼或改错数值。
+      </p>
+      <form onSubmit={onSubmit}>
+        <div className="eyes">
+          <EyeFieldset
+            legend="右眼（OD）录入"
+            side="复核右眼"
+            prefix="verify-right"
+            value={right}
+            onChange={onRightChange}
+            eyeKey="right"
+            differences={verify?.differences ?? []}
+            fieldLabels={{ S: "复核右眼 S 球镜", C: "复核右眼 C 柱镜", A: "复核右眼 A 轴位" }}
+          />
+          <EyeFieldset
+            legend="左眼（OS）录入"
+            side="复核左眼"
+            prefix="verify-left"
+            value={left}
+            onChange={onLeftChange}
+            eyeKey="left"
+            differences={verify?.differences ?? []}
+            fieldLabels={{ S: "复核左眼 S 球镜", C: "复核左眼 C 柱镜", A: "复核左眼 A 轴位" }}
+          />
+        </div>
+        <button type="submit" disabled={busy}>
+          {busy ? "复核中…" : "复核录入"}
+        </button>
+      </form>
+
+      {rejection && (
+        <section role="alert" className="rejection" aria-label="复核录入被拒绝">
+          <h3>复核录入被拒绝</h3>
+          <p>已生成的磨片参数仍然有效，请修正录入后重新复核：</p>
+          <ul>
+            {rejection.map((reason, i) => (
+              <li key={i}>{reason}</li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {verify?.match && (
+        <p className="pass verify-status" role="status">
+          双眼录入全部吻合，可继续加工 ✓
+        </p>
+      )}
+      {verify && !verify.match && (
+        <p className="fail verify-status" role="status">
+          复核不吻合：共 {verify.differences.length} 处差异，请核对上方标注字段
+        </p>
+      )}
+    </section>
   );
 }
 

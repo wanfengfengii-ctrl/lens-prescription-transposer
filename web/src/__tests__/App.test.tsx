@@ -175,3 +175,185 @@ describe("处方核对页", () => {
     expect(await screen.findByLabelText("核对结果")).toHaveTextContent("正柱镜记法");
   });
 });
+
+/** 与后端比对响应一致的载荷 */
+const VERIFY_MATCH = { match: true, differences: [] };
+const VERIFY_MISMATCH_RIGHT_S = {
+  match: false,
+  differences: [{ eye: "right", field: "S", expected: "+3.00", entered: "+3.25" }],
+};
+
+async function fillEntryAndSubmit(
+  user: ReturnType<typeof userEvent.setup>,
+  values?: { rightS?: string },
+) {
+  await user.type(screen.getByLabelText("复核右眼 S 球镜"), values?.rightS ?? "+3.00");
+  await user.type(screen.getByLabelText("复核右眼 C 柱镜"), "-2.00");
+  await user.type(screen.getByLabelText("复核右眼 A 轴位"), "120");
+  await user.type(screen.getByLabelText("复核左眼 S 球镜"), "-1.25");
+  await user.type(screen.getByLabelText("复核左眼 C 柱镜"), "-0.50");
+  await user.type(screen.getByLabelText("复核左眼 A 轴位"), "85");
+  await user.click(screen.getByRole("button", { name: "复核录入" }));
+}
+
+describe("双眼录入复核", () => {
+  it("仅在成功生成磨片参数后展示复核输入区", async () => {
+    fetchMock.mockResolvedValue(fakeResponse(200, BACKEND_OK));
+    const user = userEvent.setup();
+    render(<App />);
+
+    // 未提交前没有复核输入区
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+
+    await fillAndSubmit(user);
+    expect(await screen.findByLabelText("双眼录入复核")).toBeInTheDocument();
+  });
+
+  it("转置 422 时不展示复核输入区", async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse(422, { detail: ["右眼.S: 必须是 0.25 的整数倍，收到 '1.13'"] }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByRole("alert");
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+  });
+
+  it("完全吻合：给出可继续加工的明确提示，请求携带原转置请求与录入值", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MATCH));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user);
+
+    expect(
+      await screen.findByText("双眼录入全部吻合，可继续加工 ✓"),
+    ).toBeInTheDocument();
+
+    // 复核请求：原转置请求 + 操作员录入的双眼 S/C/A
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [url, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/v1/verify-entry");
+    expect(JSON.parse(String(init.body))).toEqual({
+      prescription: {
+        target: "minus",
+        right: { S: "1.00", C: "2.00", A: "30" },
+        left: { S: "-1.25", C: "-0.50", A: "85" },
+      },
+      entry: {
+        right: { S: "+3.00", C: "-2.00", A: "120" },
+        left: { S: "-1.25", C: "-0.50", A: "85" },
+      },
+    });
+  });
+
+  it("复核携带的是生成磨片参数的那次请求，而非事后改动的表单值", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MATCH));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+
+    // 转置成功后改动原处方表单（不重新提交），复核仍应携带原请求
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "9");
+    await fillEntryAndSubmit(user);
+
+    const [, init] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body.prescription.right).toEqual({ S: "1.00", C: "2.00", A: "30" });
+  });
+
+  it("单眼单字段不符：差异标在对应字段旁", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MISMATCH_RIGHT_S));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user, { rightS: "+3.25" });
+
+    // 整单结论：不吻合
+    expect(
+      await screen.findByText("复核不吻合：共 1 处差异，请核对上方标注字段"),
+    ).toBeInTheDocument();
+
+    // 差异标在右眼 S 字段旁，其它字段无标注
+    const diff = screen.getByTestId("diff-right-S");
+    expect(diff).toHaveTextContent("不吻合：期望 +3.00，录入 +3.25");
+    expect(screen.getByLabelText("复核右眼 S 球镜")).toHaveAttribute(
+      "aria-describedby",
+      diff.id,
+    );
+    expect(screen.queryByTestId("diff-right-C")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("diff-right-A")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("diff-left-S")).not.toBeInTheDocument();
+  });
+
+  it("录入非法 → 整次 422：保留磨片参数、移除过期结论并显示原因", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MATCH));
+    const user = userEvent.setup();
+    render(<App />);
+
+    // 先做一次完全吻合的复核，留下结论
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user);
+    await screen.findByText("双眼录入全部吻合，可继续加工 ✓");
+
+    // 改成非法录入（科学计数法）再次复核 → 整次 422
+    fetchMock.mockResolvedValueOnce(
+      fakeResponse(422, {
+        detail: ["复核录入.右眼.S: 必须是十进制定点数（不接受科学计数法），收到 '1e0'"],
+      }),
+    );
+    await user.clear(screen.getByLabelText("复核右眼 S 球镜"));
+    await user.type(screen.getByLabelText("复核右眼 S 球镜"), "1e0");
+    await user.click(screen.getByRole("button", { name: "复核录入" }));
+
+    // 显示具体原因
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("复核录入被拒绝");
+    expect(alert).toHaveTextContent("不接受科学计数法");
+
+    // 过期结论被移除，磨片参数仍然保留
+    expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("diff-right-S")).not.toBeInTheDocument();
+    expect(screen.getByTestId("grinding-order")).toHaveTextContent(
+      "OD（右眼） S +3.00 C -2.00 A 120",
+    );
+    expect(screen.getByLabelText("核对结果")).toBeInTheDocument();
+  });
+
+  it("修改原处方或目标记法后立即清除旧复核结论", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MISMATCH_RIGHT_S));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user, { rightS: "+3.25" });
+    await screen.findByText("复核不吻合：共 1 处差异，请核对上方标注字段");
+
+    // 改动原处方 → 结论与字段标注立即消失
+    await user.type(screen.getByLabelText("左眼 S（球镜）"), "0");
+    expect(screen.queryByText(/复核不吻合/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("diff-right-S")).not.toBeInTheDocument();
+
+    // 再次复核吻合后，切换目标记法 → 结论同样立即消失
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MATCH));
+    await user.click(screen.getByRole("button", { name: "复核录入" }));
+    await screen.findByText("双眼录入全部吻合，可继续加工 ✓");
+    await user.selectOptions(screen.getByLabelText("目标记法"), "plus");
+    expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+  });
+});
