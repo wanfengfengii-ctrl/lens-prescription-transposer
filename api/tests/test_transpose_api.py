@@ -135,7 +135,7 @@ class TestStepAndFormat:
     def test_quarter_step_accepted(self, v):
         assert post(rx(right=eye(v, "0.00", 0))).status_code == 200
 
-    @pytest.mark.parametrize("v", ["abc", "", "1e2", "nan", "inf", None, True, [1], {"x": 1}])
+    @pytest.mark.parametrize("v", ["abc", "", "nan", "inf", None, True, [1], {"x": 1}])
     def test_non_decimal_rejected(self, v):
         assert post(rx(right=eye(v, "0.00", 0))).status_code == 422
 
@@ -147,6 +147,38 @@ class TestStepAndFormat:
         # 0.25 + 0.25 必须精确等于 0.50（整数运算，无浮点误差）
         r = post(rx(right=eye("0.25", "0.25", 10)))
         assert r.json()["right"]["output"] == {"S": "+0.50", "C": "-0.25", "A": 100}
+
+
+class TestScientificNotation:
+    """科学计数法写法的数值即使落在合法范围内，也必须整单拒绝。"""
+
+    @pytest.mark.parametrize(
+        "v",
+        [
+            "1e0", "1E0", "1e+0", "1e1", "2e1", "5e-1", "2.5e-2",
+            "1.25e1", "0.5e1", "+1e0", "-1E0", " 1e0 ", "1e2",
+        ],
+    )
+    def test_sphere_scientific_notation_rejected(self, v):
+        # 2e1 = 20.00、5e-1 = 0.50 等数值本身合规，但记法不合规
+        assert post(rx(right=eye(v, "0.00", 0))).status_code == 422
+
+    @pytest.mark.parametrize("v", ["1e0", "2.5e-1", "1E1", "5e-1"])
+    def test_cylinder_scientific_notation_rejected(self, v):
+        # 2.5e-1 = 0.25、5e-1 = 0.50 均为合法步长数值，但记法不合规
+        assert post(rx(right=eye("0.00", v, 30))).status_code == 422
+
+    @pytest.mark.parametrize("v", ["9e1", "1.8e2", "1e2", "1E0"])
+    def test_axis_scientific_notation_rejected(self, v):
+        # 9e1 = 90、1.8e2 = 180 均为合法轴位数值，但记法不合规
+        assert post(rx(right=eye("1.00", "1.00", v))).status_code == 422
+
+    def test_scientific_notation_rejects_whole_prescription(self):
+        r = post(rx(right=eye("1e0", "0.00", 0)))
+        assert r.status_code == 422
+        body = r.json()
+        assert "right" not in body and "left" not in body
+        assert any("科学计数法" in m for m in body["detail"])
 
 
 class TestAxisRules:

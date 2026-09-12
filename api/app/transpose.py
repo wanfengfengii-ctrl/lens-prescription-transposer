@@ -12,8 +12,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
+import re
 
 MIN_Q = -80  # -20.00 D，四分之一屈光度整数
 MAX_Q = 80   # +20.00 D
@@ -21,6 +22,11 @@ MAX_Q = 80   # +20.00 D
 TARGET_PLUS = "plus"
 TARGET_MINUS = "minus"
 VALID_TARGETS = (TARGET_PLUS, TARGET_MINUS)
+
+# 十进制定点数字面量：可带符号与小数点，拒绝 1e0 等科学计数法及其它写法
+_FIXED_POINT_RE = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$")
+# 整数轴位字面量：仅十进制整数
+_INTEGER_RE = re.compile(r"^[+-]?[0-9]+$")
 
 
 class PrescriptionError(ValueError):
@@ -48,15 +54,18 @@ def _parse_quarters(value: Any, field: str, errors: list[str]) -> int | None:
     if value is None or isinstance(value, bool):
         errors.append(f"{field}: 必须是 -20.00 至 +20.00、步长 0.25 的十进制定点数")
         return None
-    try:
-        d = Decimal(str(value))
-    except (InvalidOperation, ValueError):
-        errors.append(f"{field}: 必须是十进制数，收到 {value!r}")
+    if isinstance(value, str):
+        text = value.strip()
+    elif isinstance(value, (int, float)):
+        text = str(value)
+    else:
+        errors.append(f"{field}: 必须是十进制定点数，收到 {value!r}")
         return None
-    if not d.is_finite():
-        errors.append(f"{field}: 必须是有限十进制数，收到 {value!r}")
+    # 记法闸门：只接受定点数写法，1e0 / 5e-1 等科学计数法一律拒绝
+    if not _FIXED_POINT_RE.fullmatch(text):
+        errors.append(f"{field}: 必须是十进制定点数（不接受科学计数法），收到 {value!r}")
         return None
-    q = d * 4
+    q = Decimal(text) * 4
     if q != q.to_integral_value():
         errors.append(f"{field}: 必须是 0.25 的整数倍，收到 {value!r}")
         return None
@@ -80,13 +89,9 @@ def _parse_axis(value: Any, field: str, errors: list[str]) -> int | None:
         errors.append(f"{field}: 必须是整数，收到 {value!r}")
         return None
     if isinstance(value, str):
-        try:
-            d = Decimal(value.strip())
-        except (InvalidOperation, ValueError):
-            errors.append(f"{field}: 必须是整数，收到 {value!r}")
-            return None
-        if d.is_finite() and d == d.to_integral_value():
-            return int(d)
+        text = value.strip()
+        if _INTEGER_RE.fullmatch(text):
+            return int(text)
         errors.append(f"{field}: 必须是整数，收到 {value!r}")
         return None
     errors.append(f"{field}: 必须是整数，收到 {value!r}")

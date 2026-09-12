@@ -111,6 +111,26 @@ test.describe("处方柱镜记法核对页（真实后端联调）", () => {
     await expect(page.getByTestId("grinding-order")).toHaveCount(0);
   });
 
+  test("科学计数法输入：整单拒绝，不生成磨片参数", async ({ page }) => {
+    await page.goto("/");
+    await page.getByLabel("目标记法").selectOption("minus");
+    await fillEye(page, "右眼", "1e0", "2.00", "30");
+    await fillEye(page, "左眼", "-0.50", "1.25", "175");
+    await page.getByRole("button", { name: "核对并转置" }).click();
+
+    const alert = page.getByRole("alert");
+    await expect(alert).toContainText("处方被拒绝");
+    await expect(alert).toContainText("科学计数法");
+    await expect(page.getByTestId("grinding-order")).toHaveCount(0);
+
+    // 柱镜填入科学计数法同样整单拒绝
+    await page.getByLabel("右眼 S（球镜）").fill("1.00");
+    await page.getByLabel("右眼 C（柱镜）").fill("5e-1");
+    await page.getByRole("button", { name: "核对并转置" }).click();
+    await expect(alert).toContainText("科学计数法");
+    await expect(page.getByTestId("grinding-order")).toHaveCount(0);
+  });
+
   test("先成功后失败：旧加工值被清除", async ({ page }) => {
     await page.goto("/");
     await page.getByLabel("目标记法").selectOption("minus");
