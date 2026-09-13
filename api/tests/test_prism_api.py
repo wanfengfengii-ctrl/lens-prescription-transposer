@@ -127,6 +127,22 @@ class TestPrismValidation:
         assert r.status_code == 422
         assert any("右眼.P" in m for m in r.json()["detail"])
 
+    @pytest.mark.parametrize("literal", ["1e0", "5e-1", "2.5e-2", "1E1"])
+    def test_power_json_number_scientific_notation_rejected(self, literal):
+        # JSON 数字字面量的科学计数法棱镜度数：数值即使合规也整单 422，不带入磨片参数
+        r = client.post(
+            "/api/v1/transpose",
+            content=(
+                '{"target": "minus", '
+                f'"right": {{"S": "1.00", "C": "2.00", "A": 30, "P": {literal}, "B": "外"}}, '
+                '"left": {"S": "-1.25", "C": "-0.50", "A": 85}}'
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 422
+        assert any("右眼.P" in m and "科学计数法" in m for m in r.json()["detail"])
+        assert "right" not in r.json() and "left" not in r.json()
+
     @pytest.mark.parametrize("b", ["左", "右", "内内", "up", "", 5, True])
     def test_invalid_base_rejected(self, b):
         r = post_transpose(rx(right=eye(p="1.00", b=b)))

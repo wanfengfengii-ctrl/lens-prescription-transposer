@@ -180,6 +180,39 @@ class TestScientificNotation:
         assert "right" not in body and "left" not in body
         assert any("科学计数法" in m for m in body["detail"])
 
+    @pytest.mark.parametrize(
+        "literal", ["1e0", "1E0", "1e+0", "5e-1", "2e1", "2.5e-2", "1.25e1"]
+    )
+    def test_json_number_scientific_notation_rejected(self, literal):
+        # JSON 数字字面量的科学计数法（非字符串）：数值即使合规也整单 422
+        for field_body in (
+            f'{{"S": {literal}, "C": "0.00", "A": 0}}',
+            f'{{"S": "0.00", "C": {literal}, "A": 0}}',
+        ):
+            r = client.post(
+                "/api/v1/transpose",
+                content=(
+                    '{"target": "minus", "right": '
+                    + field_body
+                    + ', "left": {"S": "0.00", "C": "0.00", "A": 0}}'
+                ).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+            )
+            assert r.status_code == 422
+            assert any("科学计数法" in m for m in r.json()["detail"])
+            assert "right" not in r.json() and "left" not in r.json()
+
+    def test_json_number_fixed_point_still_accepted(self):
+        # 定点写法的 JSON 数字照常接受（1.5、0.5、30）
+        r = client.post(
+            "/api/v1/transpose",
+            content=b'{"target": "minus", "right": {"S": 1.5, "C": 0.5, "A": 30},'
+            b' "left": {"S": 0.5, "C": 0.0, "A": 0}}',
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 200
+        assert r.json()["right"]["input"] == {"S": "+1.50", "C": "+0.50", "A": 30}
+
 
 class TestAxisRules:
     @pytest.mark.parametrize("a", [1, 45, 90, 180, "180", 90.0])

@@ -3,7 +3,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.transpose import PrescriptionError, transpose_prescription, verify_entry
+from app.transpose import (
+    JsonFloatLiteral,
+    PrescriptionError,
+    transpose_prescription,
+    verify_entry,
+)
 
 client = TestClient(app)
 
@@ -265,3 +270,148 @@ class TestScopeVerifyEntry:
                     "entry": {"left": eye("abc", "-0.50", 85)},
                 }
             )
+
+
+class TestSingleEyeJsonNumberNotation:
+    """JSON 数字字面量写成的科学计数法（1e0、5e-1 等）：数值即使落在合法
+    范围内，也与字符串写法一样在单眼转置、棱镜携带与录入复核中整单/整次拒绝。
+
+    请求体以原始 JSON 文本发送：json=payload 会把 Python 浮点序列化成定点
+    写法（1.0），无法构造科学计数法数字字面量。
+    """
+
+    def post_transpose_raw(self, body: str):
+        return client.post(
+            "/api/v1/transpose",
+            content=body.encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    def post_verify_raw(self, body: str):
+        return client.post(
+            "/api/v1/verify-entry",
+            content=body.encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+
+    @pytest.mark.parametrize(
+        "literal", ["1e0", "1E0", "1e+0", "5e-1", "2e1", "2.5e-2", "1.25e1"]
+    )
+    def test_right_only_sphere_scientific_number_rejected(self, literal):
+        # 2e1 = 20.00、5e-1 = 0.50 等数值本身合规，但记法不合规 → 整单 422
+        body = (
+            '{"target": "minus", "scope": "right", '
+            f'"right": {{"S": {literal}, "C": "2.00", "A": 30}}}}'
+        )
+        r = self.post_transpose_raw(body)
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert any("右眼.S" in m and "科学计数法" in m for m in detail)
+        # 整单拒绝：不返回任何眼别结果
+        assert "right" not in r.json() and "left" not in r.json()
+
+    @pytest.mark.parametrize("literal", ["5e-1", "2.5e-1", "1e0", "1E1"])
+    def test_right_only_cylinder_scientific_number_rejected(self, literal):
+        # 5e-1 = 0.50、2.5e-1 = 0.25 均为合法步长数值，但记法不合规 → 整单 422
+        body = (
+            '{"target": "minus", "scope": "right", '
+            f'"right": {{"S": "1.00", "C": {literal}, "A": 30}}}}'
+        )
+        r = self.post_transpose_raw(body)
+        assert r.status_code == 422
+        assert any("右眼.C" in m and "科学计数法" in m for m in r.json()["detail"])
+        assert "right" not in r.json()
+
+    def test_right_only_prism_scientific_number_rejected(self):
+        # 棱镜度数 2e0 = 2.00 数值合规，但记法不合规 → 整单 422，不带入磨片参数
+        body = (
+            '{"target": "minus", "scope": "right", '
+            '"right": {"S": "1.00", "C": "2.00", "A": 30, "P": 2e0, "B": "外"}}'
+        )
+        r = self.post_transpose_raw(body)
+        assert r.status_code == 422
+        assert any("右眼.P" in m and "科学计数法" in m for m in r.json()["detail"])
+        assert "right" not in r.json()
+
+    def test_right_only_axis_scientific_number_rejected(self):
+        # 9e1 = 90 为合法轴位数值，但记法不合规 → 整单 422
+        body = (
+            '{"target": "minus", "scope": "right", '
+            '"right": {"S": "1.00", "C": "2.00", "A": 9e1}}'
+        )
+        r = self.post_transpose_raw(body)
+        assert r.status_code == 422
+        assert any("右眼.A" in m for m in r.json()["detail"])
+        assert "right" not in r.json()
+
+    def test_left_only_sphere_scientific_number_rejected(self):
+        body = (
+            '{"target": "minus", "scope": "left", '
+            '"left": {"S": "1e0", "C": "-0.50", "A": 85}}'
+        )
+        r = self.post_transpose_raw(body)
+        assert r.status_code == 422
+        assert any("左眼.S" in m and "科学计数法" in m for m in r.json()["detail"])
+        assert "left" not in r.json()
+
+    def test_right_only_entry_scientific_number_rejected(self):
+        # 复核录入球镜 3e0 = 3.00 数值与期望吻合，但记法不合规 → 整次复核 422
+        body = (
+            '{"prescription": {"target": "minus", "scope": "right", '
+            '"right": {"S": "1.00", "C": "2.00", "A": 30}}, '
+            '"entry": {"right": {"S": 3e0, "C": "-2.00", "A": 120}}}'
+        )
+        r = self.post_verify_raw(body)
+        assert r.status_code == 422
+        detail = r.json()["detail"]
+        assert any("复核录入.右眼.S" in m and "科学计数法" in m for m in detail)
+        # 整次拒绝：不返回任何比对结果
+        assert "match" not in r.json() and "differences" not in r.json()
+
+    def test_left_only_entry_scientific_number_rejected(self):
+        body = (
+            '{"prescription": {"target": "minus", "scope": "left", '
+            '"left": {"S": "-1.25", "C": "-0.50", "A": 85}}, '
+            '"entry": {"left": {"S": "-1.25", "C": "5e-1", "A": 85}}}'
+        )
+        r = self.post_verify_raw(body)
+        assert r.status_code == 422
+        assert any("复核录入.左眼.C" in m for m in r.json()["detail"])
+
+    def test_fixed_point_json_numbers_still_accepted(self):
+        # 定点写法的 JSON 数字（1.5、0.5、30、1.5）不受记法闸门影响
+        body = (
+            '{"target": "minus", "scope": "right", '
+            '"right": {"S": 1.5, "C": 0.5, "A": 30, "P": 1.5, "B": "外"}}'
+        )
+        r = self.post_transpose_raw(body)
+        assert r.status_code == 200
+        right = r.json()["right"]
+        assert right["input"] == {"S": "+1.50", "C": "+0.50", "A": 30}
+        assert right["prism"] == {"P": "+1.50", "B": "外"}
+
+    def test_fixed_point_json_axis_float_still_accepted(self):
+        body = (
+            '{"target": "minus", "scope": "right", '
+            '"right": {"S": "1.00", "C": "2.00", "A": 90.0}}'
+        )
+        assert self.post_transpose_raw(body).status_code == 200
+
+    def test_pure_function_json_float_literal(self):
+        # 领域层直接拒绝科学计数法字面量，接受定点写法字面量
+        with pytest.raises(PrescriptionError):
+            transpose_prescription(
+                {
+                    "target": MINUS,
+                    "scope": "right",
+                    "right": {"S": JsonFloatLiteral("1e0"), "C": "2.00", "A": 30},
+                }
+            )
+        res = transpose_prescription(
+            {
+                "target": MINUS,
+                "scope": "right",
+                "right": {"S": JsonFloatLiteral("1.50"), "C": "2.00", "A": 30},
+            }
+        )
+        assert res["right"]["input"]["S"] == "+1.50"

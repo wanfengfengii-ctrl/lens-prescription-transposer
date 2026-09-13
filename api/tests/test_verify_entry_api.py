@@ -141,6 +141,25 @@ class TestEntryValidation:
         assert "match" not in body and "differences" not in body
         assert any("复核录入.右眼.S" in m for m in body["detail"])
 
+    @pytest.mark.parametrize("literal", ["3e0", "1e0", "5e-1", "2.5e-2"])
+    def test_json_number_scientific_notation_rejected(self, literal):
+        # 录入值以 JSON 数字字面量写成科学计数法：数值即使与期望吻合也整次 422
+        r = client.post(
+            "/api/v1/verify-entry",
+            content=(
+                '{"prescription": {"target": "minus", '
+                '"right": {"S": "1.00", "C": "2.00", "A": 30}, '
+                '"left": {"S": "-1.25", "C": "-0.50", "A": 85}}, '
+                f'"entry": {{"right": {{"S": {literal}, "C": "-2.00", "A": 120}}, '
+                '"left": {"S": "-1.25", "C": "-0.50", "A": 85}}}'
+            ).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+        )
+        assert r.status_code == 422
+        body = r.json()
+        assert "match" not in body and "differences" not in body
+        assert any("复核录入.右眼.S" in m and "科学计数法" in m for m in body["detail"])
+
     def test_non_quarter_step_rejected(self):
         r = verify(entry(right=eye("+3.13", "-2.00", 120)))
         assert r.status_code == 422

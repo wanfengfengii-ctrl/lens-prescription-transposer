@@ -56,6 +56,25 @@ _FIXED_POINT_RE = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$")
 _INTEGER_RE = re.compile(r"^[+-]?[0-9]+$")
 
 
+class JsonFloatLiteral:
+    """HTTP 层 JSON 浮点数字面量的原样写法（json.loads 的 parse_float 钩子返回）。
+
+    默认的 json.loads 会把 1e0、5e-1 等科学计数法字面量解析为 float，
+    str() 后又归一化回定点写法（1.0、0.5），使记法闸门漏检。本类型保留
+    源文写法（如 '1e0'），由定点数闸门按既定格式规则拒绝；定点写法
+    （1.5、90.0）则正常参与数值校验。
+    """
+
+    __slots__ = ("literal",)
+
+    def __init__(self, literal: str) -> None:
+        self.literal = literal
+
+    def __repr__(self) -> str:
+        # 错误消息中与字符串输入一致地展示原写法（如 收到 '1e0'）
+        return repr(self.literal)
+
+
 class PrescriptionError(ValueError):
     """整张处方被拒绝（对应 HTTP 422）。errors 为人类可读的原因列表。"""
 
@@ -88,7 +107,10 @@ def _parse_quarters(
     if value is None or isinstance(value, bool):
         errors.append(f"{field}: 必须是 {range_text}、步长 0.25 的十进制定点数")
         return None
-    if isinstance(value, str):
+    if isinstance(value, JsonFloatLiteral):
+        # JSON 浮点字面量：保留源文写法，科学计数法在下方记法闸门被拒绝
+        text = value.literal
+    elif isinstance(value, str):
         text = value.strip()
     elif isinstance(value, (int, float)):
         text = str(value)
@@ -114,6 +136,15 @@ def _parse_axis(value: Any, field: str, errors: list[str]) -> int | None:
     """把 JSON 值解析为整数轴位；失败时记录错误并返回 None。"""
     if value is None or isinstance(value, bool):
         errors.append(f"{field}: 必须是整数")
+        return None
+    if isinstance(value, JsonFloatLiteral):
+        # JSON 浮点字面量：定点写法的整数（90.0）接受，科学计数法（9e1）拒绝
+        text = value.literal
+        if _FIXED_POINT_RE.fullmatch(text):
+            decimal_value = Decimal(text)
+            if decimal_value == decimal_value.to_integral_value():
+                return int(decimal_value)
+        errors.append(f"{field}: 必须是整数，收到 {value!r}")
         return None
     if isinstance(value, int):
         return value
