@@ -12,15 +12,18 @@ export interface EyePayload {
 
 export interface TransposeRequest {
   target: "plus" | "minus";
-  right: EyePayload;
-  left: EyePayload;
+  /** 加工范围：仅单眼时携带（right/left）；双眼为默认值，不携带以保持旧契约 */
+  scope?: "right" | "left";
+  /** 双眼处方含两眼；单眼处方仅携带所选眼，另一眼不随请求发出 */
+  right?: EyePayload;
+  left?: EyePayload;
 }
 
 export interface VerifyEntryRequest {
   /** 生成当前磨片参数的那次原转置请求 */
   prescription: TransposeRequest;
-  /** 操作员抄入设备后再次录入的双眼 S/C/A */
-  entry: { right: EyePayload; left: EyePayload };
+  /** 操作员抄入设备后再次录入的 S/C/A（仅当前加工范围内的眼别） */
+  entry: { right?: EyePayload; left?: EyePayload };
 }
 
 /** 共用 POST：422 抛 RejectionError（保留全部原因），其它失败抛 Error */
@@ -54,7 +57,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 }
 
 /**
- * 单次提交双眼处方与目标记法。
+ * 提交处方与目标记法（默认双眼；单眼处方携带 scope 且只发所选眼）。
  * 页面不做任何换算，全部结果由后端返回并原样展示。
  */
 export async function transposePrescription(
@@ -64,7 +67,7 @@ export async function transposePrescription(
 }
 
 /**
- * 双眼录入复核：携带原转置请求与操作员录入值，
+ * 设备录入复核：携带原转置请求与操作员录入值（仅当前加工范围内的眼别），
  * 由后端重算期望值并逐字段比较，页面只展示比对结论。
  */
 export async function verifyEntry(

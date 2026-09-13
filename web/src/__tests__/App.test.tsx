@@ -789,3 +789,201 @@ describe("棱镜补偿", () => {
     expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
   });
 });
+
+/** 单眼加工的后端响应：仅右眼 / 仅左眼（回传 scope，另一眼不出现） */
+const BACKEND_OK_RIGHT_ONLY = {
+  target: "minus",
+  scope: "right",
+  right: BACKEND_OK.right,
+};
+const BACKEND_OK_LEFT_ONLY = {
+  target: "minus",
+  scope: "left",
+  left: BACKEND_OK.left,
+};
+
+describe("加工范围（单眼处方）", () => {
+  it("默认加工范围为双眼，请求不携带 scope 字段", async () => {
+    fetchMock.mockResolvedValue(fakeResponse(200, BACKEND_OK));
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(screen.getByLabelText("加工范围")).toHaveValue("both");
+    expect(screen.getByLabelText("右眼 S（球镜）")).toBeInTheDocument();
+    expect(screen.getByLabelText("左眼 S（球镜）")).toBeInTheDocument();
+
+    await fillAndSubmit(user);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body).not.toHaveProperty("scope");
+    expect(body).toEqual({
+      target: "minus",
+      right: { S: "1.00", C: "2.00", A: "30" },
+      left: { S: "-1.25", C: "-0.50", A: "85" },
+    });
+  });
+
+  it("仅右眼：另一眼空白不参与请求也不阻断生成，结果与磨片单只含右眼", async () => {
+    fetchMock.mockResolvedValue(fakeResponse(200, BACKEND_OK_RIGHT_ONLY));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("加工范围"), "right");
+    // 左眼字段组不再展示，操作员只填写右眼
+    expect(screen.queryByLabelText("左眼 S（球镜）")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("右眼 S（球镜）")).toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "1.00");
+    await user.type(screen.getByLabelText("右眼 C（柱镜）"), "2.00");
+    await user.type(screen.getByLabelText("右眼 A（轴位）"), "30");
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+
+    // 请求只携带所选眼：左眼空白不随请求发出
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      target: "minus",
+      scope: "right",
+      right: { S: "1.00", C: "2.00", A: "30" },
+    });
+
+    // 另一眼空白未阻断生成：结果区与磨片单只含右眼
+    expect(await screen.findByLabelText("右眼（OD）核对结果")).toBeInTheDocument();
+    expect(screen.queryByLabelText("左眼（OS）核对结果")).not.toBeInTheDocument();
+    const order = screen.getByTestId("grinding-order");
+    expect(order).toHaveTextContent("加工范围：仅右眼（OD）");
+    expect(order).toHaveTextContent("OD（右眼） S +3.00 C -2.00 A 120");
+    expect(order).not.toHaveTextContent("OS（左眼）");
+  });
+
+  it("仅左眼：请求与复核都只针对左眼，结论来自当前加工范围", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK_LEFT_ONLY));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MATCH));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("加工范围"), "left");
+    expect(screen.queryByLabelText("右眼 S（球镜）")).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("左眼 S（球镜）"), "-1.25");
+    await user.type(screen.getByLabelText("左眼 C（柱镜）"), "-0.50");
+    await user.type(screen.getByLabelText("左眼 A（轴位）"), "85");
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+
+    const [, transposeInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(transposeInit.body))).toEqual({
+      target: "minus",
+      scope: "left",
+      left: { S: "-1.25", C: "-0.50", A: "85" },
+    });
+
+    // 复核区只录入左眼
+    expect(await screen.findByLabelText("左眼录入复核")).toBeInTheDocument();
+    expect(screen.getByLabelText("复核左眼 S 球镜")).toBeInTheDocument();
+    expect(screen.queryByLabelText("复核右眼 S 球镜")).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText("复核左眼 S 球镜"), "-1.25");
+    await user.type(screen.getByLabelText("复核左眼 C 柱镜"), "-0.50");
+    await user.type(screen.getByLabelText("复核左眼 A 轴位"), "85");
+    await user.click(screen.getByRole("button", { name: "复核录入" }));
+
+    expect(
+      await screen.findByText("左眼录入全部吻合，可继续加工 ✓"),
+    ).toBeInTheDocument();
+
+    // 复核请求：原单眼请求 + 仅左眼的录入值
+    const [url, verifyInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/v1/verify-entry");
+    expect(JSON.parse(String(verifyInit.body))).toEqual({
+      prescription: {
+        target: "minus",
+        scope: "left",
+        left: { S: "-1.25", C: "-0.50", A: "85" },
+      },
+      entry: { left: { S: "-1.25", C: "-0.50", A: "85" } },
+    });
+  });
+
+  it("单眼处方非法：按整单拒绝清除加工值并显示具体原因", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK_RIGHT_ONLY));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("加工范围"), "right");
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "1.00");
+    await user.type(screen.getByLabelText("右眼 C（柱镜）"), "2.00");
+    await user.type(screen.getByLabelText("右眼 A（轴位）"), "30");
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+    await screen.findByTestId("grinding-order");
+
+    // 改坏右眼球镜重新提交 → 整单 422
+    fetchMock.mockResolvedValueOnce(
+      fakeResponse(422, { detail: ["右眼.S: 必须是 0.25 的整数倍，收到 '1.13'"] }),
+    );
+    await user.clear(screen.getByLabelText("右眼 S（球镜）"));
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "1.13");
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("处方被拒绝");
+    expect(alert).toHaveTextContent("右眼.S: 必须是 0.25 的整数倍");
+
+    // 没有残留加工值：结果区、磨片单、复核区全部消失
+    expect(screen.queryByLabelText("核对结果")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("右眼录入复核")).not.toBeInTheDocument();
+  });
+
+  it("切换加工范围：清空不再适用的输入、结果与复核结论", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MATCH));
+    const user = userEvent.setup();
+    render(<App />);
+
+    // 双眼生成参数并完成一次吻合复核，留下结论
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user);
+    await screen.findByText("双眼录入全部吻合，可继续加工 ✓");
+
+    // 切到仅右眼：结果、复核结论立即清空，左眼字段组移除
+    await user.selectOptions(screen.getByLabelText("加工范围"), "right");
+    expect(screen.queryByLabelText("核对结果")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("左眼 S（球镜）")).not.toBeInTheDocument();
+
+    // 右眼输入仍然适用而保留；切回双眼后左眼输入已被清空
+    expect(screen.getByLabelText("右眼 S（球镜）")).toHaveValue("1.00");
+    await user.selectOptions(screen.getByLabelText("加工范围"), "both");
+    expect(screen.getByLabelText("左眼 S（球镜）")).toHaveValue("");
+    expect(screen.getByLabelText("左眼 C（柱镜）")).toHaveValue("");
+    expect(screen.getByLabelText("左眼 A（轴位）")).toHaveValue("");
+  });
+
+  it("切换加工范围后进行中的旧请求返回：不能恢复已清空的加工值与复核区", async () => {
+    const pendingTranspose = deferred();
+    fetchMock.mockImplementationOnce((url: string) =>
+      url === "/api/v1/transpose"
+        ? pendingTranspose.promise
+        : Promise.resolve(fakeResponse(200, BACKEND_OK)),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+
+    // 转置响应尚未返回：切到仅左眼 → 右眼输入被清空，结果区保持为空
+    await user.selectOptions(screen.getByLabelText("加工范围"), "left");
+    expect(screen.queryByLabelText("右眼 S（球镜）")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+
+    // 旧响应（切换前双眼处方的磨片参数）到达 → 必须被丢弃
+    await pendingTranspose.resolve(fakeResponse(200, BACKEND_OK));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("核对结果")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+    expect(screen.queryByText("+3.00")).not.toBeInTheDocument();
+  });
+});

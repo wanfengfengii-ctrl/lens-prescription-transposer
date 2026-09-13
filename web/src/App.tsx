@@ -2,18 +2,26 @@ import { ChangeEvent, FormEvent, Fragment, useRef, useState } from "react";
 import {
   EyePayload,
   TransposeRequest,
+  VerifyEntryRequest,
   transposePrescription,
   verifyEntry,
 } from "./api";
 import {
   EntryDifference,
   EyeResult,
+  ProcessingScope,
   RejectionError,
   TransposeResponse,
   VerifyEntryResponse,
 } from "./types";
 
 const EMPTY_EYE: EyePayload = { S: "", C: "", A: "" };
+
+const SCOPE_LABELS: Record<ProcessingScope, string> = {
+  both: "双眼",
+  right: "右眼",
+  left: "左眼",
+};
 
 /** 组装单眼请求载荷：未填写（或已收起）的棱镜字段不随请求发出，保持旧契约形态 */
 function buildEyePayload(v: EyePayload): EyePayload {
@@ -23,8 +31,41 @@ function buildEyePayload(v: EyePayload): EyePayload {
   return out;
 }
 
+/** 按加工范围组装转置请求：双眼为默认值不携带 scope（旧契约），单眼只携带所选眼 */
+function buildTransposeRequest(
+  target: "minus" | "plus",
+  scope: ProcessingScope,
+  right: EyePayload,
+  left: EyePayload,
+): TransposeRequest {
+  if (scope === "right") {
+    return { target, scope: "right", right: buildEyePayload(right) };
+  }
+  if (scope === "left") {
+    return { target, scope: "left", left: buildEyePayload(left) };
+  }
+  return { target, right: buildEyePayload(right), left: buildEyePayload(left) };
+}
+
+/** 按生成磨片参数的那次请求的加工范围组装复核录入：范围外的眼别不参与 */
+function buildVerifyEntry(
+  prescription: TransposeRequest,
+  entryRight: EyePayload,
+  entryLeft: EyePayload,
+): VerifyEntryRequest["entry"] {
+  if (prescription.scope === "right") {
+    return { right: buildEyePayload(entryRight) };
+  }
+  if (prescription.scope === "left") {
+    return { left: buildEyePayload(entryLeft) };
+  }
+  return { right: buildEyePayload(entryRight), left: buildEyePayload(entryLeft) };
+}
+
 export default function App() {
   const [target, setTarget] = useState<"minus" | "plus">("minus");
+  // 加工范围：默认双眼；单眼处方只填写并提交所选眼
+  const [scope, setScope] = useState<ProcessingScope>("both");
   const [right, setRight] = useState<EyePayload>({ ...EMPTY_EYE });
   const [left, setLeft] = useState<EyePayload>({ ...EMPTY_EYE });
   const [result, setResult] = useState<TransposeResponse | null>(null);
@@ -79,6 +120,24 @@ export default function App() {
     setTarget(t);
     invalidatePrescriptionContext();
   };
+  // 切换加工范围：不再适用的输入、已生成的加工值与复核结论全部清空；
+  // 在途的旧请求因语境代号失效，返回后不能恢复这些内容
+  const onScopeChange = (s: ProcessingScope) => {
+    if (s === scope) return;
+    setScope(s);
+    transposeCtx.current += 1;
+    resetVerifyContext();
+    setResult(null);
+    setLastRequest(null);
+    setRejection(null);
+    if (s === "right") {
+      setLeft({ ...EMPTY_EYE });
+      setPrismOpenLeft(false);
+    } else if (s === "left") {
+      setRight({ ...EMPTY_EYE });
+      setPrismOpenRight(false);
+    }
+  };
   const onRightChange = (v: EyePayload) => {
     setRight(v);
     invalidatePrescriptionContext();
@@ -104,11 +163,7 @@ export default function App() {
     setBusy(true);
     resetVerifyContext();
     try {
-      const req: TransposeRequest = {
-        target,
-        right: buildEyePayload(right),
-        left: buildEyePayload(left),
-      };
+      const req = buildTransposeRequest(target, scope, right, left);
       const rx = await transposePrescription(req);
       // 响应在途期间表单又被改动、或已发起更新的提交 → 丢弃过期磨片参数
       if (ctxId !== transposeCtx.current) return;
@@ -140,10 +195,7 @@ export default function App() {
     try {
       const res = await verifyEntry({
         prescription: lastRequest,
-        entry: {
-          right: buildEyePayload(entryRight),
-          left: buildEyePayload(entryLeft),
-        },
+        entry: buildVerifyEntry(lastRequest, entryRight, entryLeft),
       });
       // 在途期间原处方/设备录入已改动、参数已重新生成 → 丢弃过期结论
       if (ctxId !== verifyCtx.current) return;
@@ -170,12 +222,27 @@ export default function App() {
       <p className="hint">
         球镜 S / 柱镜 C 接受 -20.00 至 +20.00、步长 0.25 的十进制定点数（1e0
         等科学计数法不予接受）；C 非零时轴位 A 取 1–180 的整数，C 为零时 A 必须为 0。
-        任一眼不合规将整单拒绝，不输出任何加工参数。部分处方还带棱镜补偿：
+        任一眼不合规将整单拒绝，不输出任何加工参数。加工范围默认双眼；
+        仅配单眼的处方可切换为仅右眼或仅左眼，此时只填写并核对所选眼。
+        部分处方还带棱镜补偿：
         度数 0.00 至 10.00、步长 0.25，非零时须指定基底方向（上/下/内/外），
         零度不接受方向；棱镜不参与球柱镜换算，将原样携带进磨片参数。
       </p>
 
       <form onSubmit={onSubmit}>
+        <div className="target-row">
+          <label htmlFor="scope">加工范围</label>
+          <select
+            id="scope"
+            value={scope}
+            onChange={(e) => onScopeChange(e.target.value as ProcessingScope)}
+          >
+            <option value="both">双眼</option>
+            <option value="right">仅右眼（OD）</option>
+            <option value="left">仅左眼（OS）</option>
+          </select>
+        </div>
+
         <div className="target-row">
           <label htmlFor="target">目标记法</label>
           <select
@@ -189,24 +256,28 @@ export default function App() {
         </div>
 
         <div className="eyes">
-          <EyeFieldset
-            legend="右眼（OD）"
-            side="右眼"
-            prefix="right"
-            value={right}
-            onChange={onRightChange}
-            prismOpen={prismOpenRight}
-            onPrismOpenChange={setPrismOpenRight}
-          />
-          <EyeFieldset
-            legend="左眼（OS）"
-            side="左眼"
-            prefix="left"
-            value={left}
-            onChange={onLeftChange}
-            prismOpen={prismOpenLeft}
-            onPrismOpenChange={setPrismOpenLeft}
-          />
+          {scope !== "left" && (
+            <EyeFieldset
+              legend="右眼（OD）"
+              side="右眼"
+              prefix="right"
+              value={right}
+              onChange={onRightChange}
+              prismOpen={prismOpenRight}
+              onPrismOpenChange={setPrismOpenRight}
+            />
+          )}
+          {scope !== "right" && (
+            <EyeFieldset
+              legend="左眼（OS）"
+              side="左眼"
+              prefix="left"
+              value={left}
+              onChange={onLeftChange}
+              prismOpen={prismOpenLeft}
+              onPrismOpenChange={setPrismOpenLeft}
+            />
+          )}
         </div>
 
         <button type="submit" disabled={busy}>
@@ -233,13 +304,14 @@ export default function App() {
               核对结果（{result.target === "minus" ? "负柱镜记法" : "正柱镜记法"}）
             </h2>
             <div className="eyes">
-              <EyeResultCard title="右眼（OD）" eye={result.right} />
-              <EyeResultCard title="左眼（OS）" eye={result.left} />
+              {result.right && <EyeResultCard title="右眼（OD）" eye={result.right} />}
+              {result.left && <EyeResultCard title="左眼（OS）" eye={result.left} />}
             </div>
             <GrindingOrder result={result} />
           </section>
 
           <VerifyEntrySection
+            scope={result.scope ?? "both"}
             right={entryRight}
             left={entryLeft}
             onRightChange={onEntryRightChange}
@@ -395,8 +467,9 @@ function EyeFieldset(props: {
   );
 }
 
-/** 双眼录入复核：仅在成功生成磨片参数后展示 */
+/** 设备录入复核：仅在成功生成磨片参数后展示，只针对当前加工范围内的眼别 */
 function VerifyEntrySection(props: {
+  scope: ProcessingScope;
   right: EyePayload;
   left: EyePayload;
   onRightChange: (v: EyePayload) => void;
@@ -411,6 +484,7 @@ function VerifyEntrySection(props: {
   rejection: string[] | null;
 }) {
   const {
+    scope,
     right,
     left,
     onRightChange,
@@ -424,52 +498,57 @@ function VerifyEntrySection(props: {
     verify,
     rejection,
   } = props;
+  const scopeLabel = SCOPE_LABELS[scope];
   return (
-    <section aria-label="双眼录入复核" className="verify">
-      <h2>双眼录入复核</h2>
+    <section aria-label={`${scopeLabel}录入复核`} className="verify">
+      <h2>{scopeLabel}录入复核</h2>
       <p className="hint">
-        磨片参数抄入设备后，请将设备中的双眼 S / C / A 再次录入并提交复核，
+        磨片参数抄入设备后，请将设备中的{scopeLabel} S / C / A 再次录入并提交复核，
         确认没有串眼或改错数值。处方含棱镜补偿时，请展开对应眼别的棱镜录入，
         将度数与基底方向一并复核。
       </p>
       <form onSubmit={onSubmit}>
         <div className="eyes">
-          <EyeFieldset
-            legend="右眼（OD）录入"
-            side="复核右眼"
-            prefix="verify-right"
-            value={right}
-            onChange={onRightChange}
-            eyeKey="right"
-            differences={verify?.differences ?? []}
-            fieldLabels={{
-              S: "复核右眼 S 球镜",
-              C: "复核右眼 C 柱镜",
-              A: "复核右眼 A 轴位",
-              P: "复核右眼 P 棱镜",
-              B: "复核右眼 B 基底",
-            }}
-            prismOpen={prismOpenRight}
-            onPrismOpenChange={onPrismOpenRightChange}
-          />
-          <EyeFieldset
-            legend="左眼（OS）录入"
-            side="复核左眼"
-            prefix="verify-left"
-            value={left}
-            onChange={onLeftChange}
-            eyeKey="left"
-            differences={verify?.differences ?? []}
-            fieldLabels={{
-              S: "复核左眼 S 球镜",
-              C: "复核左眼 C 柱镜",
-              A: "复核左眼 A 轴位",
-              P: "复核左眼 P 棱镜",
-              B: "复核左眼 B 基底",
-            }}
-            prismOpen={prismOpenLeft}
-            onPrismOpenChange={onPrismOpenLeftChange}
-          />
+          {scope !== "left" && (
+            <EyeFieldset
+              legend="右眼（OD）录入"
+              side="复核右眼"
+              prefix="verify-right"
+              value={right}
+              onChange={onRightChange}
+              eyeKey="right"
+              differences={verify?.differences ?? []}
+              fieldLabels={{
+                S: "复核右眼 S 球镜",
+                C: "复核右眼 C 柱镜",
+                A: "复核右眼 A 轴位",
+                P: "复核右眼 P 棱镜",
+                B: "复核右眼 B 基底",
+              }}
+              prismOpen={prismOpenRight}
+              onPrismOpenChange={onPrismOpenRightChange}
+            />
+          )}
+          {scope !== "right" && (
+            <EyeFieldset
+              legend="左眼（OS）录入"
+              side="复核左眼"
+              prefix="verify-left"
+              value={left}
+              onChange={onLeftChange}
+              eyeKey="left"
+              differences={verify?.differences ?? []}
+              fieldLabels={{
+                S: "复核左眼 S 球镜",
+                C: "复核左眼 C 柱镜",
+                A: "复核左眼 A 轴位",
+                P: "复核左眼 P 棱镜",
+                B: "复核左眼 B 基底",
+              }}
+              prismOpen={prismOpenLeft}
+              onPrismOpenChange={onPrismOpenLeftChange}
+            />
+          )}
         </div>
         <button type="submit" disabled={busy}>
           {busy ? "复核中…" : "复核录入"}
@@ -490,7 +569,7 @@ function VerifyEntrySection(props: {
 
       {verify?.match && (
         <p className="pass verify-status" role="status">
-          双眼录入全部吻合，可继续加工 ✓
+          {scopeLabel}录入全部吻合，可继续加工 ✓
         </p>
       )}
       {verify && !verify.match && (
@@ -570,6 +649,7 @@ function EyeResultCard({ title, eye }: { title: string; eye: EyeResult }) {
 
 function GrindingOrder({ result }: { result: TransposeResponse }) {
   const [copied, setCopied] = useState(false);
+  const scope = result.scope ?? "both";
   // 棱镜随磨片参数原样携带，便于操作员连同 S/C/A 一起抄入设备
   const eyeLine = (label: string, eye: EyeResult) => {
     let line = `${label} S ${eye.output.S} C ${eye.output.C} A ${eye.output.A}`;
@@ -579,11 +659,13 @@ function GrindingOrder({ result }: { result: TransposeResponse }) {
     }
     return line;
   };
-  const text = [
-    `目标记法：${result.target === "minus" ? "负柱镜" : "正柱镜"}`,
-    eyeLine("OD（右眼）", result.right),
-    eyeLine("OS（左眼）", result.left),
-  ].join("\n");
+  const lines = [`目标记法：${result.target === "minus" ? "负柱镜" : "正柱镜"}`];
+  if (scope !== "both") {
+    lines.push(`加工范围：仅${SCOPE_LABELS[scope]}（${scope === "right" ? "OD" : "OS"}）`);
+  }
+  if (result.right) lines.push(eyeLine("OD（右眼）", result.right));
+  if (result.left) lines.push(eyeLine("OS（左眼）", result.left));
+  const text = lines.join("\n");
 
   async function copy() {
     try {
@@ -596,7 +678,9 @@ function GrindingOrder({ result }: { result: TransposeResponse }) {
 
   return (
     <section aria-label="磨片单参数" className="grinding-order">
-      <h3>磨片单参数（双眼唯一结果，可抄入磨片单）</h3>
+      <h3>
+        磨片单参数（{scope === "both" ? "双眼" : "单眼"}唯一结果，可抄入磨片单）
+      </h3>
       <pre data-testid="grinding-order">{text}</pre>
       <button type="button" onClick={copy}>
         {copied ? "已复制" : "复制加工参数"}

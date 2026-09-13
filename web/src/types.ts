@@ -4,6 +4,9 @@ export interface EyeValues {
   A: number;
 }
 
+/** 加工范围：双眼（默认）或仅单眼 */
+export type ProcessingScope = "both" | "right" | "left";
+
 /** 棱镜基底方向 */
 export type PrismBase = "上" | "下" | "内" | "外";
 
@@ -35,8 +38,11 @@ export interface EyeResult {
 
 export interface TransposeResponse {
   target: "plus" | "minus";
-  right: EyeResult;
-  left: EyeResult;
+  /** 单眼加工时回传的加工范围；双眼请求（旧契约）省略该字段 */
+  scope?: "right" | "left";
+  /** 双眼结果含两眼；单眼结果仅含所选眼 */
+  right?: EyeResult;
+  left?: EyeResult;
 }
 
 /** 单处录入差异：眼别、字段、期望值与录入值（S/C/P 为两位小数字符串，A 为整数，B 为方向或“无”） */

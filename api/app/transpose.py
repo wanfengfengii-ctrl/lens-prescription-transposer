@@ -13,6 +13,11 @@
 步长 0.25；非零时必须指定基底方向（上/下/内/外），零值不接受方向。
 棱镜不参与球柱镜换算，在转置结果中原样返回；未提供棱镜的旧请求
 仍按原契约处理，响应省略棱镜字段。
+
+处方可带加工范围 scope：both（默认，双眼）、right（仅右眼）、left（仅左眼）。
+加工中心偶尔收到仅配单眼的处方，选择单眼后只校验并返回所选眼，
+另一眼缺失或空白均不参与；未传 scope 的旧请求仍按双眼契约解析，
+响应维持原结构（不含 scope 字段）。
 """
 from __future__ import annotations
 
@@ -31,6 +36,19 @@ PRISM_BASES = ("上", "下", "内", "外")
 TARGET_PLUS = "plus"
 TARGET_MINUS = "minus"
 VALID_TARGETS = (TARGET_PLUS, TARGET_MINUS)
+
+# 加工范围：双眼（默认）或仅单眼
+SCOPE_BOTH = "both"
+SCOPE_RIGHT = "right"
+SCOPE_LEFT = "left"
+VALID_SCOPES = (SCOPE_BOTH, SCOPE_RIGHT, SCOPE_LEFT)
+
+# 各加工范围参与校验、转置与输出的眼别（眼别键, 中文标签）
+_SCOPE_EYES: dict[str, tuple[tuple[str, str], ...]] = {
+    SCOPE_BOTH: (("right", "右眼"), ("left", "左眼")),
+    SCOPE_RIGHT: (("right", "右眼"),),
+    SCOPE_LEFT: (("left", "左眼"),),
+}
 
 # 十进制定点数字面量：可带符号与小数点，拒绝 1e0 等科学计数法及其它写法
 _FIXED_POINT_RE = re.compile(r"^[+-]?(?:[0-9]+(?:\.[0-9]+)?|\.[0-9]+)$")
@@ -269,11 +287,14 @@ def _eye_payload(t: EyeTransposition) -> dict[str, Any]:
     return payload
 
 
-def _validate_and_transpose(raw: Any) -> tuple[str, dict[str, EyeTransposition]]:
-    """校验整张处方并完成双眼转置，返回 (目标记法, 双眼转置结果)。
+def _validate_and_transpose(raw: Any) -> tuple[str, str, dict[str, EyeTransposition]]:
+    """校验处方并完成加工范围内各眼的转置，返回 (目标记法, 加工范围, 各眼结果)。
 
-    任一眼不合规（含转置后 S' 超界）即抛 PrescriptionError，
-    由 API 层映射为 422，且不输出任何一眼的结果。
+    加工范围 scope 可选：both（默认，双眼）、right（仅右眼）、left（仅左眼）。
+    未传 scope 的旧请求按双眼契约解析；单眼范围只校验所选眼，另一眼
+    缺失、空白或携带任意数据均不参与。范围内任一眼不合规（含转置后
+    S' 超界）即抛 PrescriptionError，由 API 层映射为 422，
+    且不输出任何一眼的结果。
     """
     if not isinstance(raw, dict):
         raise PrescriptionError(["请求体必须是包含 target、right、left 的对象"])
@@ -282,9 +303,16 @@ def _validate_and_transpose(raw: Any) -> tuple[str, dict[str, EyeTransposition]]
     if target not in VALID_TARGETS:
         raise PrescriptionError([f"target: 必须是 'plus' 或 'minus'，收到 {target!r}"])
 
+    scope = raw.get("scope", SCOPE_BOTH)
+    if scope not in VALID_SCOPES:
+        raise PrescriptionError(
+            [f"scope: 必须是 'both'、'right' 或 'left'，收到 {scope!r}"]
+        )
+
+    eyes_in_scope = _SCOPE_EYES[scope]
     errors: list[str] = []
     eyes: dict[str, EyeInput] = {}
-    for key, label in (("right", "右眼"), ("left", "左眼")):
+    for key, label in eyes_in_scope:
         try:
             eyes[key] = validate_eye(raw.get(key), label)
         except PrescriptionError as exc:
@@ -293,7 +321,7 @@ def _validate_and_transpose(raw: Any) -> tuple[str, dict[str, EyeTransposition]]
         raise PrescriptionError(errors)
 
     results: dict[str, EyeTransposition] = {}
-    for key, label in (("right", "右眼"), ("left", "左眼")):
+    for key, label in eyes_in_scope:
         try:
             results[key] = transpose_eye(eyes[key], target)
         except PrescriptionError as exc:
@@ -301,28 +329,35 @@ def _validate_and_transpose(raw: Any) -> tuple[str, dict[str, EyeTransposition]]
     if errors:
         raise PrescriptionError(errors)
 
-    return target, results
+    return target, scope, results
 
 
 def transpose_prescription(raw: Any) -> dict[str, Any]:
-    """整张处方转置（校验与原子性见 _validate_and_transpose）。"""
-    target, results = _validate_and_transpose(raw)
-    return {
-        "target": target,
-        "right": _eye_payload(results["right"]),
-        "left": _eye_payload(results["left"]),
-    }
+    """整张处方转置（校验与原子性见 _validate_and_transpose）。
+
+    双眼请求返回原结构（target + right + left）；单眼请求仅返回
+    所选眼结果，并回传 scope 标明本次加工范围。
+    """
+    target, scope, results = _validate_and_transpose(raw)
+    payload: dict[str, Any] = {"target": target}
+    if scope != SCOPE_BOTH:
+        payload["scope"] = scope
+    for key in ("right", "left"):
+        if key in results:
+            payload[key] = _eye_payload(results[key])
+    return payload
 
 
 def verify_entry(raw: Any) -> dict[str, Any]:
-    """双眼录入复核：操作员把磨片参数抄入设备后再次录入，逐字段比对。
+    """设备录入复核：操作员把磨片参数抄入设备后再次录入，逐字段比对。
 
     请求体：{"prescription": 原转置请求, "entry": {"right": {...}, "left": {...}}}。
-    复用现有校验与整数转置逻辑重算期望值；原处方或录入值不合规
-    任一项即整次复核 422。全部合法时逐字段比较（四分之一屈光度整数
-    比较，无浮点误差），除 S、C、A 外还逐眼比较可选的棱镜度数 P 与
-    基底方向 B（棱镜不参与转置，期望值即原处方值），返回整单是否吻合
-    及每处差异的眼别、字段、期望值与录入值。
+    复核范围跟随原处方的加工范围：单眼处方只重算并比较所选眼，另一眼
+    缺失或携带任意数据均不参与。复用现有校验与整数转置逻辑重算期望值；
+    原处方或录入值不合规任一项即整次复核 422。全部合法时逐字段比较
+    （四分之一屈光度整数比较，无浮点误差），除 S、C、A 外还逐眼比较
+    可选的棱镜度数 P 与基底方向 B（棱镜不参与转置，期望值即原处方值），
+    返回整单是否吻合及每处差异的眼别、字段、期望值与录入值。
     """
     if not isinstance(raw, dict):
         raise PrescriptionError(["请求体必须是包含 prescription、entry 的对象"])
@@ -332,17 +367,20 @@ def verify_entry(raw: Any) -> dict[str, Any]:
         raise PrescriptionError(["entry: 缺少必填字段（双眼录入值）"])
 
     # 原处方不合规 → 整次复核拒绝（与 /api/v1/transpose 同一套校验）
-    _, results = _validate_and_transpose(raw["prescription"])
+    _, _, results = _validate_and_transpose(raw["prescription"])
 
     entry = raw["entry"]
     if not isinstance(entry, dict):
         raise PrescriptionError(["entry: 必须是包含 right、left 的对象"])
 
+    labels = {"right": "复核录入.右眼", "left": "复核录入.左眼"}
     errors: list[str] = []
     entered: dict[str, EyeInput] = {}
-    for key, label in (("right", "复核录入.右眼"), ("left", "复核录入.左眼")):
+    for key in ("right", "left"):
+        if key not in results:
+            continue  # 不在加工范围内的眼别不参与复核
         try:
-            entered[key] = validate_eye(entry.get(key), label)
+            entered[key] = validate_eye(entry.get(key), labels[key])
         except PrescriptionError as exc:
             errors.extend(exc.errors)
     if errors:
@@ -350,6 +388,8 @@ def verify_entry(raw: Any) -> dict[str, Any]:
 
     differences: list[dict[str, Any]] = []
     for key in ("right", "left"):
+        if key not in results:
+            continue  # 只比较加工范围内的眼别
         expected = results[key]
         got = entered[key]
         for field, exp_q, got_q in (

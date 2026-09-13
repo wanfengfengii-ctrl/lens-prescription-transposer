@@ -93,6 +93,29 @@ describe("transposePrescription", () => {
     );
     await expect(transposePrescription(REQUEST)).rejects.toThrow("无法连接核对服务");
   });
+
+  it("单眼处方：原样携带 scope 且只发所选眼", async () => {
+    const singleEyeResponse = {
+      target: "minus",
+      scope: "right",
+      right: OK_BODY.right,
+    };
+    const fetchMock = vi.fn(async () => fakeResponse(200, singleEyeResponse));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = {
+      target: "minus" as const,
+      scope: "right" as const,
+      right: { S: "1.00", C: "2.00", A: "30" },
+    };
+    const res = await transposePrescription(req);
+
+    expect(res).toEqual(singleEyeResponse);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body).toEqual(req);
+    expect(body).not.toHaveProperty("left");
+  });
 });
 
 describe("verifyEntry", () => {
@@ -157,5 +180,27 @@ describe("verifyEntry", () => {
       }),
     );
     await expect(verifyEntry(VERIFY_REQUEST)).rejects.toThrow("无法连接核对服务");
+  });
+
+  it("单眼复核：录入值只携带当前加工范围内的眼别", async () => {
+    const fetchMock = vi.fn(async () => fakeResponse(200, MATCH_BODY));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const singleEyeVerify = {
+      prescription: {
+        target: "minus" as const,
+        scope: "left" as const,
+        left: { S: "-1.25", C: "-0.50", A: "85" },
+      },
+      entry: { left: { S: "-1.25", C: "-0.50", A: "85" } },
+    };
+    const res = await verifyEntry(singleEyeVerify);
+
+    expect(res).toEqual(MATCH_BODY);
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(String(init.body));
+    expect(body).toEqual(singleEyeVerify);
+    expect(body.prescription).not.toHaveProperty("right");
+    expect(body.entry).not.toHaveProperty("right");
   });
 });
