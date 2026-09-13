@@ -141,4 +141,134 @@ test.describe("双眼录入复核（真实后端联调）", () => {
       page.getByText("双眼录入全部吻合，可继续加工 ✓"),
     ).toHaveCount(0);
   });
+
+  test("吻合后改动设备录入值：结论立即作废，回到未复核", async ({ page }) => {
+    await transposeDefault(page);
+    await fillEntry(page, "复核右眼", "+3.00", "-2.00", "120");
+    await fillEntry(page, "复核左眼", "-1.25", "-0.50", "85");
+    await page.getByRole("button", { name: "复核录入" }).click();
+    await expect(
+      page.getByText("双眼录入全部吻合，可继续加工 ✓"),
+    ).toBeVisible();
+
+    // 修改右眼设备球镜 → 全部吻合的宣告必须立即消失，且不变成“不吻合”
+    await page.getByLabel("复核右眼 S 球镜").fill("+3.25");
+    await expect(
+      page.getByText("双眼录入全部吻合，可继续加工 ✓"),
+    ).toHaveCount(0);
+    await expect(page.getByText("复核不吻合")).toHaveCount(0);
+    await expect(page.getByTestId("diff-right-S")).toHaveCount(0);
+
+    // 磨片参数不受影响
+    await expect(page.getByTestId("grinding-order")).toContainText(
+      "OD（右眼） S +3.00 C -2.00 A 120",
+    );
+  });
+
+  test("重新生成另一张合法参数后：复核录入清空，不复用旧处方的设备值", async ({
+    page,
+  }) => {
+    await transposeDefault(page);
+    await fillEntry(page, "复核右眼", "+3.00", "-2.00", "120");
+    await fillEntry(page, "复核左眼", "-1.25", "-0.50", "85");
+    await page.getByRole("button", { name: "复核录入" }).click();
+    await expect(
+      page.getByText("双眼录入全部吻合，可继续加工 ✓"),
+    ).toBeVisible();
+
+    // 换另一张合法处方并重新生成参数（右眼已符合负柱镜记法，原样返回）
+    await fillEye(page, "右眼", "0.50", "-0.75", "60");
+    await page.getByRole("button", { name: "核对并转置" }).click();
+    await expect(page.getByTestId("grinding-order")).toContainText(
+      "OD（右眼） S +0.50 C -0.75 A 60",
+    );
+
+    // 新复核区：双眼设备录入全部清空，等待重新填写；旧吻合结论不沿用
+    for (const label of [
+      "复核右眼 S 球镜",
+      "复核右眼 C 柱镜",
+      "复核右眼 A 轴位",
+      "复核左眼 S 球镜",
+      "复核左眼 C 柱镜",
+      "复核左眼 A 轴位",
+    ]) {
+      await expect(page.getByLabel(label)).toHaveValue("");
+    }
+    await expect(
+      page.getByText("双眼录入全部吻合，可继续加工 ✓"),
+    ).toHaveCount(0);
+  });
+
+  test("复核响应在途时修改原处方球镜：旧响应到达后不得回填过期结论", async ({
+    page,
+  }) => {
+    let releaseVerify: () => void = () => {};
+    await page.route("**/api/v1/verify-entry", async (route) => {
+      await new Promise<void>((resolve) => {
+        releaseVerify = resolve;
+      });
+      await route.continue();
+    });
+
+    await transposeDefault(page);
+    await fillEntry(page, "复核右眼", "+3.00", "-2.00", "120");
+    await fillEntry(page, "复核左眼", "-1.25", "-0.50", "85");
+    const verifyRequest = page.waitForRequest("**/api/v1/verify-entry");
+    await page.getByRole("button", { name: "复核录入" }).click();
+    await verifyRequest;
+    await expect(page.getByRole("button", { name: "复核中…" })).toBeVisible();
+
+    // 响应尚未返回时修改当前原处方球镜
+    await page.getByLabel("右眼 S（球镜）").fill("2.00");
+    await expect(
+      page.getByText("双眼录入全部吻合，可继续加工 ✓"),
+    ).toHaveCount(0);
+
+    // 放行旧响应：修改前处方的吻合结论必须被丢弃
+    const verifyResponse = page.waitForResponse("**/api/v1/verify-entry");
+    releaseVerify();
+    await verifyResponse;
+    await page.waitForLoadState("networkidle");
+
+    await expect(
+      page.getByText("双眼录入全部吻合，可继续加工 ✓"),
+    ).toHaveCount(0);
+    await expect(page.getByText("复核不吻合")).toHaveCount(0);
+    await expect(page.getByTestId("diff-right-S")).toHaveCount(0);
+  });
+
+  test("转置响应在途时修改右眼柱镜：旧响应不得展示过期磨片参数或开放复核", async ({
+    page,
+  }) => {
+    let releaseTranspose: () => void = () => {};
+    await page.route("**/api/v1/transpose", async (route) => {
+      await new Promise<void>((resolve) => {
+        releaseTranspose = resolve;
+      });
+      await route.continue();
+    });
+
+    await page.goto("/");
+    await page.getByLabel("目标记法").selectOption("minus");
+    await fillEye(page, "右眼", "1.00", "2.00", "30");
+    await fillEye(page, "左眼", "-1.25", "-0.50", "85");
+    const transposeRequest = page.waitForRequest("**/api/v1/transpose");
+    await page.getByRole("button", { name: "核对并转置" }).click();
+    await transposeRequest;
+
+    // 转置响应尚未返回时修改右眼柱镜
+    await page.getByLabel("右眼 C（柱镜）").fill("1.75");
+    await expect(page.getByTestId("grinding-order")).toHaveCount(0);
+    await expect(page.getByLabel("双眼录入复核")).toHaveCount(0);
+
+    // 放行旧响应：修改前处方的磨片参数与复核区必须被丢弃
+    const transposeResponse = page.waitForResponse("**/api/v1/transpose");
+    releaseTranspose();
+    await transposeResponse;
+    await page.waitForLoadState("networkidle");
+
+    await expect(page.getByTestId("grinding-order")).toHaveCount(0);
+    await expect(page.getByLabel("双眼录入复核")).toHaveCount(0);
+    await expect(page.getByText("+3.00")).toHaveCount(0);
+  });
 });

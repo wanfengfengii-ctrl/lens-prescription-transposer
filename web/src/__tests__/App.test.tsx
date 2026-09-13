@@ -36,6 +36,17 @@ function fakeResponse(status: number, body: unknown): Response {
   } as unknown as Response;
 }
 
+/** 可控的在途请求：在测试需要时再让响应到达 */
+function deferred() {
+  let resolve!: (value: unknown) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<unknown>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 let fetchMock: ReturnType<typeof vi.fn>;
 
 beforeEach(() => {
@@ -355,5 +366,108 @@ describe("双眼录入复核", () => {
     await screen.findByText("双眼录入全部吻合，可继续加工 ✓");
     await user.selectOptions(screen.getByLabelText("目标记法"), "plus");
     expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+  });
+
+  it("复核吻合后改动设备录入值：旧结论立即作废，回到未复核", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, VERIFY_MATCH));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user);
+    await screen.findByText("双眼录入全部吻合，可继续加工 ✓");
+
+    // 复核吻合后修改右眼设备球镜值 → 全部吻合的结论必须立即消失
+    const rightS = screen.getByLabelText("复核右眼 S 球镜");
+    await user.clear(rightS);
+    await user.type(rightS, "+3.25");
+    expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+    expect(screen.queryByText(/复核不吻合/)).not.toBeInTheDocument();
+    expect(screen.queryByTestId("diff-right-S")).not.toBeInTheDocument();
+  });
+
+  it("重新生成磨片参数：新复核区清空设备录入，不复用上一张处方的值", async () => {
+    fetchMock.mockImplementation((url: string) =>
+      Promise.resolve(
+        fakeResponse(
+          200,
+          url === "/api/v1/verify-entry" ? VERIFY_MATCH : BACKEND_OK,
+        ),
+      ),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user);
+    expect(screen.getByLabelText("复核右眼 S 球镜")).toHaveValue("+3.00");
+
+    // 换一张合法处方重新生成参数 → 复核区必须清空，等待重新填写
+    await user.clear(screen.getByLabelText("右眼 S（球镜）"));
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "0.50");
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+    await screen.findByTestId("grinding-order");
+
+    expect(screen.getByLabelText("复核右眼 S 球镜")).toHaveValue("");
+    expect(screen.getByLabelText("复核右眼 C 柱镜")).toHaveValue("");
+    expect(screen.getByLabelText("复核右眼 A 轴位")).toHaveValue("");
+    expect(screen.getByLabelText("复核左眼 S 球镜")).toHaveValue("");
+    expect(screen.getByLabelText("复核左眼 C 柱镜")).toHaveValue("");
+    expect(screen.getByLabelText("复核左眼 A 轴位")).toHaveValue("");
+    expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+  });
+
+  it("复核请求在途时修改原处方球镜：旧响应到达后不得回填过期结论", async () => {
+    const pendingVerify = deferred();
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockImplementationOnce((url: string) =>
+      url === "/api/v1/verify-entry"
+        ? pendingVerify.promise
+        : Promise.resolve(fakeResponse(200, BACKEND_OK)),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user);
+
+    // 复核响应尚未返回：此时修改当前原处方球镜 → 回到未复核
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "9");
+    expect(screen.queryByText(/复核不吻合|双眼录入全部吻合/)).not.toBeInTheDocument();
+
+    // 旧响应（修改前处方的吻合结论）到达 → 必须被丢弃
+    await pendingVerify.resolve(fakeResponse(200, VERIFY_MATCH));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("diff-right-S")).not.toBeInTheDocument();
+  });
+
+  it("转置请求在途时修改右眼柱镜：旧响应到达后不得展示过期磨片参数或开放复核", async () => {
+    const pendingTranspose = deferred();
+    fetchMock.mockImplementationOnce((url: string) =>
+      url === "/api/v1/transpose"
+        ? pendingTranspose.promise
+        : Promise.resolve(fakeResponse(200, BACKEND_OK)),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+
+    // 转置响应尚未返回：此时修改右眼柱镜
+    await user.type(screen.getByLabelText("右眼 C（柱镜）"), "9");
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+
+    // 旧响应（修改前处方的磨片参数）到达 → 必须被丢弃
+    await pendingTranspose.resolve(fakeResponse(200, BACKEND_OK));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+    expect(screen.queryByText("+3.00")).not.toBeInTheDocument();
   });
 });

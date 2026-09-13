@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, Fragment, useState } from "react";
+import { ChangeEvent, FormEvent, Fragment, useRef, useState } from "react";
 import {
   EyePayload,
   TransposeRequest,
@@ -31,29 +31,63 @@ export default function App() {
   const [verifyRejection, setVerifyRejection] = useState<string[] | null>(null);
   const [verifyBusy, setVerifyBusy] = useState(false);
 
-  // 修改原处方或目标记法 → 旧复核结论立即作废
-  function clearVerifyConclusion() {
+  // 请求代号：每发起一次请求便 +1，决定由哪次请求结束 busy
+  const transposeSubmitId = useRef(0);
+  const verifySubmitId = useRef(0);
+  // 语境代号：请求所依据的输入一旦变更便 +1，回填时代号不符的过期响应一律丢弃
+  const transposeCtx = useRef(0);
+  const verifyCtx = useRef(0);
+
+  // 原处方 / 目标记法变更：在途转置与在途复核同时失去语境，旧复核结论立即作废
+  function invalidatePrescriptionContext() {
+    transposeCtx.current += 1;
+    verifyCtx.current += 1;
+    setVerify(null);
+    setVerifyRejection(null);
+  }
+  // 重新生成磨片参数：复核语境整体作废，双眼设备录入清空等待重新填写
+  function resetVerifyContext() {
+    verifyCtx.current += 1;
+    setEntryRight({ ...EMPTY_EYE });
+    setEntryLeft({ ...EMPTY_EYE });
+    setVerify(null);
+    setVerifyRejection(null);
+  }
+  // 复核区设备录入值被改动 → 旧比对结论不再对应当前录入，立即回到未复核
+  function invalidateEntryContext() {
+    verifyCtx.current += 1;
     setVerify(null);
     setVerifyRejection(null);
   }
 
   const onTargetChange = (t: "minus" | "plus") => {
     setTarget(t);
-    clearVerifyConclusion();
+    invalidatePrescriptionContext();
   };
   const onRightChange = (v: EyePayload) => {
     setRight(v);
-    clearVerifyConclusion();
+    invalidatePrescriptionContext();
   };
   const onLeftChange = (v: EyePayload) => {
     setLeft(v);
-    clearVerifyConclusion();
+    invalidatePrescriptionContext();
+  };
+  const onEntryRightChange = (v: EyePayload) => {
+    setEntryRight(v);
+    invalidateEntryContext();
+  };
+  const onEntryLeftChange = (v: EyePayload) => {
+    setEntryLeft(v);
+    invalidateEntryContext();
   };
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    // 本次提交成为最新一代：在途的旧转置响应、旧复核语境全部作废
+    const submitId = ++transposeSubmitId.current;
+    const ctxId = ++transposeCtx.current;
     setBusy(true);
-    clearVerifyConclusion();
+    resetVerifyContext();
     try {
       const req: TransposeRequest = {
         target,
@@ -61,10 +95,13 @@ export default function App() {
         left: { ...left },
       };
       const rx = await transposePrescription(req);
+      // 响应在途期间表单又被改动、或已发起更新的提交 → 丢弃过期磨片参数
+      if (ctxId !== transposeCtx.current) return;
       setResult(rx);
       setLastRequest(req);
       setRejection(null);
     } catch (err) {
+      if (ctxId !== transposeCtx.current) return;
       // 任一眼不合规 → 整单拒绝：清空全部残留加工值，只展示拒绝原因
       setResult(null);
       setLastRequest(null);
@@ -74,22 +111,28 @@ export default function App() {
           : [err instanceof Error ? err.message : String(err)],
       );
     } finally {
-      setBusy(false);
+      // 仅最新一次提交负责结束 busy；表单改动作废响应时由本次提交收尾
+      if (submitId === transposeSubmitId.current) setBusy(false);
     }
   }
 
   async function onVerifySubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!lastRequest) return;
+    const submitId = ++verifySubmitId.current;
+    const ctxId = ++verifyCtx.current;
     setVerifyBusy(true);
     try {
       const res = await verifyEntry({
         prescription: lastRequest,
         entry: { right: entryRight, left: entryLeft },
       });
+      // 在途期间原处方/设备录入已改动、参数已重新生成 → 丢弃过期结论
+      if (ctxId !== verifyCtx.current) return;
       setVerify(res);
       setVerifyRejection(null);
     } catch (err) {
+      if (ctxId !== verifyCtx.current) return;
       // 录入不合法 → 整次复核 422：保留已生成的磨片参数，
       // 移除过期复核结论，只显示本次拒绝原因
       setVerify(null);
@@ -99,7 +142,7 @@ export default function App() {
           : [err instanceof Error ? err.message : String(err)],
       );
     } finally {
-      setVerifyBusy(false);
+      if (submitId === verifySubmitId.current) setVerifyBusy(false);
     }
   }
 
@@ -163,8 +206,8 @@ export default function App() {
           <VerifyEntrySection
             right={entryRight}
             left={entryLeft}
-            onRightChange={setEntryRight}
-            onLeftChange={setEntryLeft}
+            onRightChange={onEntryRightChange}
+            onLeftChange={onEntryLeftChange}
             onSubmit={onVerifySubmit}
             busy={verifyBusy}
             verify={verify}
