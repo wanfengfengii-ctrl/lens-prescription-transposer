@@ -189,6 +189,32 @@ input[aria-invalid="true"] {
   background: #fff5f5;
 }
 
+select[aria-invalid="true"] {
+  border-color: #e5484d;
+  background: #fff5f5;
+}
+
+.prism-toggle {
+  margin-top: 10px;
+}
+
+.prism-toggle-btn {
+  margin-top: 0;
+  padding: 2px 0;
+  background: none;
+  color: #1668dc;
+  font-size: 0.9rem;
+}
+
+.prism-toggle-btn:hover {
+  text-decoration: underline;
+}
+
+.prism-note {
+  color: #5a6b7b;
+  font-size: 0.9rem;
+}
+
 .verify-status {
   font-size: 1.05rem;
   padding: 10px 14px;

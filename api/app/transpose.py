@@ -8,6 +8,11 @@
     S' = S + C
     C' = -C
     A' = A + 90，若 A' > 180 则 A' -= 180
+
+每眼可选携带棱镜补偿（P 度数 + B 基底方向）：度数 0.00 至 10.00、
+步长 0.25；非零时必须指定基底方向（上/下/内/外），零值不接受方向。
+棱镜不参与球柱镜换算，在转置结果中原样返回；未提供棱镜的旧请求
+仍按原契约处理，响应省略棱镜字段。
 """
 from __future__ import annotations
 
@@ -18,6 +23,10 @@ import re
 
 MIN_Q = -80  # -20.00 D，四分之一屈光度整数
 MAX_Q = 80   # +20.00 D
+
+PRISM_MIN_Q = 0   # 0.00 Δ，棱镜度数下限
+PRISM_MAX_Q = 40  # +10.00 Δ，棱镜度数上限
+PRISM_BASES = ("上", "下", "内", "外")
 
 TARGET_PLUS = "plus"
 TARGET_MINUS = "minus"
@@ -49,10 +58,17 @@ def fmt(q: int) -> str:
     return f"{sign}{a // 4}.{(a % 4) * 25:02d}"
 
 
-def _parse_quarters(value: Any, field: str, errors: list[str]) -> int | None:
+def _parse_quarters(
+    value: Any,
+    field: str,
+    errors: list[str],
+    min_q: int = MIN_Q,
+    max_q: int = MAX_Q,
+) -> int | None:
     """把 JSON 值解析为四分之一屈光度整数；失败时记录错误并返回 None。"""
+    range_text = f"{fmt(min_q)} 至 {fmt(max_q)}"
     if value is None or isinstance(value, bool):
-        errors.append(f"{field}: 必须是 -20.00 至 +20.00、步长 0.25 的十进制定点数")
+        errors.append(f"{field}: 必须是 {range_text}、步长 0.25 的十进制定点数")
         return None
     if isinstance(value, str):
         text = value.strip()
@@ -70,8 +86,8 @@ def _parse_quarters(value: Any, field: str, errors: list[str]) -> int | None:
         errors.append(f"{field}: 必须是 0.25 的整数倍，收到 {value!r}")
         return None
     qi = int(q)
-    if not (MIN_Q <= qi <= MAX_Q):
-        errors.append(f"{field}: 超出 -20.00 至 +20.00 范围，收到 {value!r}")
+    if not (min_q <= qi <= max_q):
+        errors.append(f"{field}: 超出 {range_text} 范围，收到 {value!r}")
         return None
     return qi
 
@@ -98,13 +114,24 @@ def _parse_axis(value: Any, field: str, errors: list[str]) -> int | None:
     return None
 
 
+def _is_blank(value: Any) -> bool:
+    """可选字段的“未提供”：null 或空白字符串（键缺失由调用方另行判断）。"""
+    return value is None or (isinstance(value, str) and value.strip() == "")
+
+
 @dataclass(frozen=True)
 class EyeInput:
-    """单眼已校验输入，全部为四分之一屈光度整数 / 整数轴位。"""
+    """单眼已校验输入，全部为四分之一屈光度整数 / 整数轴位。
+
+    prism_q 为 None 表示该眼未携带棱镜；prism_q == 0 为显式零度棱镜
+    （无基底方向）；prism_q > 0 时 prism_base 必为上/下/内/外之一。
+    """
 
     s_q: int
     c_q: int
     axis: int
+    prism_q: int | None = None
+    prism_base: str | None = None
 
 
 def validate_eye(raw: Any, label: str) -> EyeInput:
@@ -127,10 +154,39 @@ def validate_eye(raw: Any, label: str) -> EyeInput:
         elif c_q != 0 and not (1 <= axis <= 180):
             errors.append(f"{label}.A: C 非零时 A 必须是 1 至 180 的整数，收到 {axis}")
 
+    # 可选棱镜补偿：P 度数（0.00–10.00，步长 0.25）+ B 基底方向（上/下/内/外）
+    prism_q: int | None = None
+    prism_base: str | None = None
+    p_given = "P" in raw and not _is_blank(raw["P"])
+    b_given = "B" in raw and not _is_blank(raw["B"])
+    if p_given:
+        prism_q = _parse_quarters(
+            raw["P"], f"{label}.P", errors, PRISM_MIN_Q, PRISM_MAX_Q
+        )
+    if b_given:
+        base = raw["B"]
+        if isinstance(base, str) and base.strip() in PRISM_BASES:
+            prism_base = base.strip()
+        else:
+            errors.append(
+                f"{label}.B: 基底方向必须是 上、下、内、外 之一，收到 {base!r}"
+            )
+    if prism_q is not None:
+        if prism_q == 0 and prism_base is not None:
+            errors.append(
+                f"{label}.B: 棱镜为零时不接受基底方向，收到 {prism_base!r}"
+            )
+        elif prism_q != 0 and not b_given:
+            errors.append(f"{label}.B: 非零棱镜必须指定基底方向（上、下、内、外）")
+    if prism_base is not None and not p_given:
+        errors.append(f"{label}.P: 指定基底方向时必须同时提供棱镜度数")
+
     if errors:
         raise PrescriptionError(errors)
     assert s_q is not None and c_q is not None and axis is not None
-    return EyeInput(s_q=s_q, c_q=c_q, axis=axis)
+    return EyeInput(
+        s_q=s_q, c_q=c_q, axis=axis, prism_q=prism_q, prism_base=prism_base
+    )
 
 
 @dataclass(frozen=True)
@@ -165,7 +221,10 @@ def transpose_eye(eye: EyeInput, target: str) -> EyeTransposition:
 
 
 def _eye_payload(t: EyeTransposition) -> dict[str, Any]:
-    """生成单眼响应：原值、转置值、两个物理方向功率的等价校核。"""
+    """生成单眼响应：原值、转置值、两个物理方向功率的等价校核。
+
+    棱镜不参与球柱镜换算，携带时在结果中原样返回；未携带则省略该字段。
+    """
     src = t.source
     # 原处方：原轴方向功率为 S，垂直方向功率为 S + C
     along_src = src.s_q
@@ -184,24 +243,30 @@ def _eye_payload(t: EyeTransposition) -> dict[str, Any]:
     if perp_deg > 180:
         perp_deg -= 180
 
-    return {
+    payload: dict[str, Any] = {
         "input": {"S": fmt(src.s_q), "C": fmt(src.c_q), "A": src.axis},
         "output": {"S": fmt(t.out_s_q), "C": fmt(t.out_c_q), "A": t.out_axis},
         "changed": t.changed,
-        "check": {
-            "originalAxisDirection": {
-                "degrees": src.axis,
-                "original": fmt(along_src),
-                "transposed": fmt(out_at_src_axis),
-            },
-            "perpendicularDirection": {
-                "degrees": perp_deg,
-                "original": fmt(perp_src),
-                "transposed": fmt(out_at_src_perp),
-            },
-            "equivalent": along_src == out_at_src_axis and perp_src == out_at_src_perp,
-        },
     }
+    if src.prism_q is not None:
+        prism: dict[str, Any] = {"P": fmt(src.prism_q)}
+        if src.prism_base is not None:
+            prism["B"] = src.prism_base
+        payload["prism"] = prism
+    payload["check"] = {
+        "originalAxisDirection": {
+            "degrees": src.axis,
+            "original": fmt(along_src),
+            "transposed": fmt(out_at_src_axis),
+        },
+        "perpendicularDirection": {
+            "degrees": perp_deg,
+            "original": fmt(perp_src),
+            "transposed": fmt(out_at_src_perp),
+        },
+        "equivalent": along_src == out_at_src_axis and perp_src == out_at_src_perp,
+    }
+    return payload
 
 
 def _validate_and_transpose(raw: Any) -> tuple[str, dict[str, EyeTransposition]]:
@@ -255,8 +320,9 @@ def verify_entry(raw: Any) -> dict[str, Any]:
     请求体：{"prescription": 原转置请求, "entry": {"right": {...}, "left": {...}}}。
     复用现有校验与整数转置逻辑重算期望值；原处方或录入值不合规
     任一项即整次复核 422。全部合法时逐字段比较（四分之一屈光度整数
-    比较，无浮点误差），返回整单是否吻合及每处差异的眼别、字段、
-    期望值与录入值。
+    比较，无浮点误差），除 S、C、A 外还逐眼比较可选的棱镜度数 P 与
+    基底方向 B（棱镜不参与转置，期望值即原处方值），返回整单是否吻合
+    及每处差异的眼别、字段、期望值与录入值。
     """
     if not isinstance(raw, dict):
         raise PrescriptionError(["请求体必须是包含 prescription、entry 的对象"])
@@ -306,6 +372,28 @@ def verify_entry(raw: Any) -> dict[str, Any]:
                     "field": "A",
                     "expected": expected.out_axis,
                     "entered": got.axis,
+                }
+            )
+        # 棱镜不参与转置，期望值即原处方值；未携带按零度无方向归一后比较
+        src = expected.source
+        exp_prism_q = src.prism_q if src.prism_q is not None else 0
+        got_prism_q = got.prism_q if got.prism_q is not None else 0
+        if got_prism_q != exp_prism_q:
+            differences.append(
+                {
+                    "eye": key,
+                    "field": "P",
+                    "expected": fmt(exp_prism_q),
+                    "entered": fmt(got_prism_q),
+                }
+            )
+        if got.prism_base != src.prism_base:
+            differences.append(
+                {
+                    "eye": key,
+                    "field": "B",
+                    "expected": src.prism_base if src.prism_base is not None else "无",
+                    "entered": got.prism_base if got.prism_base is not None else "无",
                 }
             )
 

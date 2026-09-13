@@ -15,6 +15,14 @@ import {
 
 const EMPTY_EYE: EyePayload = { S: "", C: "", A: "" };
 
+/** 组装单眼请求载荷：未填写（或已收起）的棱镜字段不随请求发出，保持旧契约形态 */
+function buildEyePayload(v: EyePayload): EyePayload {
+  const out: EyePayload = { S: v.S, C: v.C, A: v.A };
+  if (v.P !== undefined && v.P.trim() !== "") out.P = v.P;
+  if (v.B !== undefined && v.B !== "") out.B = v.B;
+  return out;
+}
+
 export default function App() {
   const [target, setTarget] = useState<"minus" | "plus">("minus");
   const [right, setRight] = useState<EyePayload>({ ...EMPTY_EYE });
@@ -22,11 +30,16 @@ export default function App() {
   const [result, setResult] = useState<TransposeResponse | null>(null);
   const [rejection, setRejection] = useState<string[] | null>(null);
   const [busy, setBusy] = useState(false);
+  // 棱镜录入默认不展开；展开状态按眼别分别管理
+  const [prismOpenRight, setPrismOpenRight] = useState(false);
+  const [prismOpenLeft, setPrismOpenLeft] = useState(false);
 
   // 生成当前磨片参数的那次转置请求（复核时原样携带）
   const [lastRequest, setLastRequest] = useState<TransposeRequest | null>(null);
   const [entryRight, setEntryRight] = useState<EyePayload>({ ...EMPTY_EYE });
   const [entryLeft, setEntryLeft] = useState<EyePayload>({ ...EMPTY_EYE });
+  const [prismOpenEntryRight, setPrismOpenEntryRight] = useState(false);
+  const [prismOpenEntryLeft, setPrismOpenEntryLeft] = useState(false);
   const [verify, setVerify] = useState<VerifyEntryResponse | null>(null);
   const [verifyRejection, setVerifyRejection] = useState<string[] | null>(null);
   const [verifyBusy, setVerifyBusy] = useState(false);
@@ -50,6 +63,8 @@ export default function App() {
     verifyCtx.current += 1;
     setEntryRight({ ...EMPTY_EYE });
     setEntryLeft({ ...EMPTY_EYE });
+    setPrismOpenEntryRight(false);
+    setPrismOpenEntryLeft(false);
     setVerify(null);
     setVerifyRejection(null);
   }
@@ -91,8 +106,8 @@ export default function App() {
     try {
       const req: TransposeRequest = {
         target,
-        right: { ...right },
-        left: { ...left },
+        right: buildEyePayload(right),
+        left: buildEyePayload(left),
       };
       const rx = await transposePrescription(req);
       // 响应在途期间表单又被改动、或已发起更新的提交 → 丢弃过期磨片参数
@@ -125,7 +140,10 @@ export default function App() {
     try {
       const res = await verifyEntry({
         prescription: lastRequest,
-        entry: { right: entryRight, left: entryLeft },
+        entry: {
+          right: buildEyePayload(entryRight),
+          left: buildEyePayload(entryLeft),
+        },
       });
       // 在途期间原处方/设备录入已改动、参数已重新生成 → 丢弃过期结论
       if (ctxId !== verifyCtx.current) return;
@@ -152,7 +170,9 @@ export default function App() {
       <p className="hint">
         球镜 S / 柱镜 C 接受 -20.00 至 +20.00、步长 0.25 的十进制定点数（1e0
         等科学计数法不予接受）；C 非零时轴位 A 取 1–180 的整数，C 为零时 A 必须为 0。
-        任一眼不合规将整单拒绝，不输出任何加工参数。
+        任一眼不合规将整单拒绝，不输出任何加工参数。部分处方还带棱镜补偿：
+        度数 0.00 至 10.00、步长 0.25，非零时须指定基底方向（上/下/内/外），
+        零度不接受方向；棱镜不参与球柱镜换算，将原样携带进磨片参数。
       </p>
 
       <form onSubmit={onSubmit}>
@@ -169,8 +189,24 @@ export default function App() {
         </div>
 
         <div className="eyes">
-          <EyeFieldset legend="右眼（OD）" side="右眼" prefix="right" value={right} onChange={onRightChange} />
-          <EyeFieldset legend="左眼（OS）" side="左眼" prefix="left" value={left} onChange={onLeftChange} />
+          <EyeFieldset
+            legend="右眼（OD）"
+            side="右眼"
+            prefix="right"
+            value={right}
+            onChange={onRightChange}
+            prismOpen={prismOpenRight}
+            onPrismOpenChange={setPrismOpenRight}
+          />
+          <EyeFieldset
+            legend="左眼（OS）"
+            side="左眼"
+            prefix="left"
+            value={left}
+            onChange={onLeftChange}
+            prismOpen={prismOpenLeft}
+            onPrismOpenChange={setPrismOpenLeft}
+          />
         </div>
 
         <button type="submit" disabled={busy}>
@@ -208,6 +244,10 @@ export default function App() {
             left={entryLeft}
             onRightChange={onEntryRightChange}
             onLeftChange={onEntryLeftChange}
+            prismOpenRight={prismOpenEntryRight}
+            prismOpenLeft={prismOpenEntryLeft}
+            onPrismOpenRightChange={setPrismOpenEntryRight}
+            onPrismOpenLeftChange={setPrismOpenEntryLeft}
             onSubmit={onVerifySubmit}
             busy={verifyBusy}
             verify={verify}
@@ -229,20 +269,45 @@ function EyeFieldset(props: {
   differences?: EntryDifference[];
   eyeKey?: "right" | "left";
   /** 自定义字段标签（复核区使用，避免与主表单标签互为子串） */
-  fieldLabels?: { S: string; C: string; A: string };
+  fieldLabels?: { S: string; C: string; A: string; P: string; B: string };
+  /** 棱镜录入是否展开（默认收起，不随请求携带棱镜字段） */
+  prismOpen: boolean;
+  onPrismOpenChange: (open: boolean) => void;
 }) {
-  const { legend, side, prefix, value, onChange, differences, eyeKey, fieldLabels } =
-    props;
+  const {
+    legend,
+    side,
+    prefix,
+    value,
+    onChange,
+    differences,
+    eyeKey,
+    fieldLabels,
+    prismOpen,
+    onPrismOpenChange,
+  } = props;
   const bind =
-    (key: keyof EyePayload) => (e: ChangeEvent<HTMLInputElement>) =>
+    (key: "S" | "C" | "A" | "P") => (e: ChangeEvent<HTMLInputElement>) =>
       onChange({ ...value, [key]: e.target.value });
-  const diffOf = (key: keyof EyePayload) =>
+  const diffOf = (key: "S" | "C" | "A" | "P" | "B") =>
     eyeKey && differences
       ? differences.find((d) => d.eye === eyeKey && d.field === key)
       : undefined;
 
+  // 收起棱镜：已填的棱镜值随之移除，请求回到不携带棱镜的旧契约形态
+  const togglePrism = () => {
+    if (prismOpen) {
+      if (value.P !== undefined || value.B !== undefined) {
+        onChange({ S: value.S, C: value.C, A: value.A });
+      }
+      onPrismOpenChange(false);
+    } else {
+      onPrismOpenChange(true);
+    }
+  };
+
   const field = (
-    key: keyof EyePayload,
+    key: "S" | "C" | "A" | "P",
     label: string,
     placeholder: string,
     inputMode: "decimal" | "numeric",
@@ -257,7 +322,7 @@ function EyeFieldset(props: {
             id={id}
             inputMode={inputMode}
             placeholder={placeholder}
-            value={value[key]}
+            value={value[key] ?? ""}
             onChange={bind(key)}
             aria-invalid={diff ? true : undefined}
             aria-describedby={diff ? `${id}-diff` : undefined}
@@ -276,12 +341,56 @@ function EyeFieldset(props: {
     );
   };
 
+  const baseDiff = diffOf("B");
+  const baseId = `${prefix}-b`;
+
   return (
     <fieldset>
       <legend>{legend}</legend>
       {field("S", fieldLabels?.S ?? `${side} S（球镜）`, "+1.25", "decimal")}
       {field("C", fieldLabels?.C ?? `${side} C（柱镜）`, "-0.75", "decimal")}
       {field("A", fieldLabels?.A ?? `${side} A（轴位）`, "1–180，C 为 0 时填 0", "numeric")}
+      <div className="prism-toggle">
+        <button
+          type="button"
+          className="prism-toggle-btn"
+          aria-expanded={prismOpen}
+          aria-controls={`${prefix}-prism`}
+          onClick={togglePrism}
+        >
+          {prismOpen ? "收起棱镜补偿 ▾" : "添加棱镜补偿 ▸"}
+        </button>
+      </div>
+      {prismOpen && (
+        <div id={`${prefix}-prism`}>
+          {field("P", fieldLabels?.P ?? `${side} P（棱镜）`, "0.00–10.00，步长 0.25", "decimal")}
+          <div className="field">
+            <label htmlFor={baseId}>{fieldLabels?.B ?? `${side} B（基底）`}</label>
+            <select
+              id={baseId}
+              value={value.B ?? ""}
+              onChange={(e) => onChange({ ...value, B: e.target.value })}
+              aria-invalid={baseDiff ? true : undefined}
+              aria-describedby={baseDiff ? `${baseId}-diff` : undefined}
+            >
+              <option value="">（无方向）</option>
+              <option value="上">上</option>
+              <option value="下">下</option>
+              <option value="内">内</option>
+              <option value="外">外</option>
+            </select>
+          </div>
+          {baseDiff && (
+            <p
+              className="diff"
+              id={`${baseId}-diff`}
+              data-testid={`diff-${eyeKey}-B`}
+            >
+              不吻合：期望 {baseDiff.expected}，录入 {baseDiff.entered}
+            </p>
+          )}
+        </div>
+      )}
     </fieldset>
   );
 }
@@ -292,19 +401,36 @@ function VerifyEntrySection(props: {
   left: EyePayload;
   onRightChange: (v: EyePayload) => void;
   onLeftChange: (v: EyePayload) => void;
+  prismOpenRight: boolean;
+  prismOpenLeft: boolean;
+  onPrismOpenRightChange: (open: boolean) => void;
+  onPrismOpenLeftChange: (open: boolean) => void;
   onSubmit: (e: FormEvent<HTMLFormElement>) => void;
   busy: boolean;
   verify: VerifyEntryResponse | null;
   rejection: string[] | null;
 }) {
-  const { right, left, onRightChange, onLeftChange, onSubmit, busy, verify, rejection } =
-    props;
+  const {
+    right,
+    left,
+    onRightChange,
+    onLeftChange,
+    prismOpenRight,
+    prismOpenLeft,
+    onPrismOpenRightChange,
+    onPrismOpenLeftChange,
+    onSubmit,
+    busy,
+    verify,
+    rejection,
+  } = props;
   return (
     <section aria-label="双眼录入复核" className="verify">
       <h2>双眼录入复核</h2>
       <p className="hint">
         磨片参数抄入设备后，请将设备中的双眼 S / C / A 再次录入并提交复核，
-        确认没有串眼或改错数值。
+        确认没有串眼或改错数值。处方含棱镜补偿时，请展开对应眼别的棱镜录入，
+        将度数与基底方向一并复核。
       </p>
       <form onSubmit={onSubmit}>
         <div className="eyes">
@@ -316,7 +442,15 @@ function VerifyEntrySection(props: {
             onChange={onRightChange}
             eyeKey="right"
             differences={verify?.differences ?? []}
-            fieldLabels={{ S: "复核右眼 S 球镜", C: "复核右眼 C 柱镜", A: "复核右眼 A 轴位" }}
+            fieldLabels={{
+              S: "复核右眼 S 球镜",
+              C: "复核右眼 C 柱镜",
+              A: "复核右眼 A 轴位",
+              P: "复核右眼 P 棱镜",
+              B: "复核右眼 B 基底",
+            }}
+            prismOpen={prismOpenRight}
+            onPrismOpenChange={onPrismOpenRightChange}
           />
           <EyeFieldset
             legend="左眼（OS）录入"
@@ -326,7 +460,15 @@ function VerifyEntrySection(props: {
             onChange={onLeftChange}
             eyeKey="left"
             differences={verify?.differences ?? []}
-            fieldLabels={{ S: "复核左眼 S 球镜", C: "复核左眼 C 柱镜", A: "复核左眼 A 轴位" }}
+            fieldLabels={{
+              S: "复核左眼 S 球镜",
+              C: "复核左眼 C 柱镜",
+              A: "复核左眼 A 轴位",
+              P: "复核左眼 P 棱镜",
+              B: "复核左眼 B 基底",
+            }}
+            prismOpen={prismOpenLeft}
+            onPrismOpenChange={onPrismOpenLeftChange}
           />
         </div>
         <button type="submit" disabled={busy}>
@@ -389,6 +531,13 @@ function EyeResultCard({ title, eye }: { title: string; eye: EyeResult }) {
         </tbody>
       </table>
       {!eye.changed && <p className="unchanged">已符合目标记法，无需转置</p>}
+      {eye.prism && (
+        <p className="prism-note">
+          棱镜补偿：P {eye.prism.P}
+          {eye.prism.B ? `，基底 ${eye.prism.B}` : ""}
+          （原样携带，不参与球柱镜换算）
+        </p>
+      )}
 
       <table aria-label={`${title}等价校核`}>
         <caption>等价校核：同一物理方向上的功率必须相等</caption>
@@ -421,10 +570,19 @@ function EyeResultCard({ title, eye }: { title: string; eye: EyeResult }) {
 
 function GrindingOrder({ result }: { result: TransposeResponse }) {
   const [copied, setCopied] = useState(false);
+  // 棱镜随磨片参数原样携带，便于操作员连同 S/C/A 一起抄入设备
+  const eyeLine = (label: string, eye: EyeResult) => {
+    let line = `${label} S ${eye.output.S} C ${eye.output.C} A ${eye.output.A}`;
+    if (eye.prism) {
+      line += ` P ${eye.prism.P}`;
+      if (eye.prism.B) line += ` ${eye.prism.B}`;
+    }
+    return line;
+  };
   const text = [
     `目标记法：${result.target === "minus" ? "负柱镜" : "正柱镜"}`,
-    `OD（右眼） S ${result.right.output.S} C ${result.right.output.C} A ${result.right.output.A}`,
-    `OS（左眼） S ${result.left.output.S} C ${result.left.output.C} A ${result.left.output.A}`,
+    eyeLine("OD（右眼）", result.right),
+    eyeLine("OS（左眼）", result.left),
   ].join("\n");
 
   async function copy() {

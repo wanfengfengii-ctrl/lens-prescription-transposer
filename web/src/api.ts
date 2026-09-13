@@ -4,6 +4,10 @@ export interface EyePayload {
   S: string;
   C: string;
   A: string;
+  /** 可选棱镜度数（0.00–10.00，步长 0.25）；未展开棱镜录入时不携带 */
+  P?: string;
+  /** 可选棱镜基底方向（上/下/内/外）；零度棱镜不接受方向 */
+  B?: string;
 }
 
 export interface TransposeRequest {

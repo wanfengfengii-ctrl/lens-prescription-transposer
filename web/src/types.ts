@@ -4,6 +4,17 @@ export interface EyeValues {
   A: number;
 }
 
+/** 棱镜基底方向 */
+export type PrismBase = "上" | "下" | "内" | "外";
+
+/** 棱镜补偿：原样携带，不参与球柱镜换算；未提供时整个字段省略 */
+export interface PrismValues {
+  /** 棱镜度数，固定两位小数字符串（0.00 至 +10.00） */
+  P: string;
+  /** 基底方向；零度棱镜无方向，该字段省略 */
+  B?: PrismBase;
+}
+
 export interface DirectionCheck {
   degrees: number;
   original: string;
@@ -14,6 +25,7 @@ export interface EyeResult {
   input: EyeValues;
   output: EyeValues;
   changed: boolean;
+  prism?: PrismValues;
   check: {
     originalAxisDirection: DirectionCheck;
     perpendicularDirection: DirectionCheck;
@@ -27,10 +39,10 @@ export interface TransposeResponse {
   left: EyeResult;
 }
 
-/** 单处录入差异：眼别、字段、期望值与录入值（S/C 为两位小数字符串，A 为整数） */
+/** 单处录入差异：眼别、字段、期望值与录入值（S/C/P 为两位小数字符串，A 为整数，B 为方向或“无”） */
 export interface EntryDifference {
   eye: "right" | "left";
-  field: "S" | "C" | "A";
+  field: "S" | "C" | "A" | "P" | "B";
   expected: string | number;
   entered: string | number;
 }
