@@ -11,7 +11,7 @@ services:
         - CMD
         - python
         - -c
-        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=2)"
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"
       interval: 5s
       timeout: 3s
       retries: 12
@@ -24,8 +24,10 @@ services:
       - "${WEB_PORT:-8080}:80"
     depends_on:
       - api
+    # 注意：容器内 localhost 优先解析为 ::1，而 nginx 仅监听 IPv4，
+    # busybox wget 不会回退到 127.0.0.1，健康检查必须显式使用 127.0.0.1
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://localhost/"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/"]
       interval: 5s
       timeout: 3s
       retries: 12
