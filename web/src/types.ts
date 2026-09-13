@@ -4,6 +4,9 @@ export interface EyeValues {
   A: number;
 }
 
+/** 柱镜目标记法：统一为正柱镜 / 统一为负柱镜 / 保持原记法（不转换符号） */
+export type TargetNotation = "plus" | "minus" | "keep";
+
 /** 加工范围：双眼（默认）或仅单眼 */
 export type ProcessingScope = "both" | "right" | "left";
 
@@ -37,7 +40,7 @@ export interface EyeResult {
 }
 
 export interface TransposeResponse {
-  target: "plus" | "minus";
+  target: TargetNotation;
   /** 单眼加工时回传的加工范围；双眼请求（旧契约）省略该字段 */
   scope?: "right" | "left";
   /** 双眼结果含两眼；单眼结果仅含所选眼 */

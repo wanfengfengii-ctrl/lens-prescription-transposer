@@ -215,6 +215,21 @@ select[aria-invalid="true"] {
   font-size: 0.9rem;
 }
 
+.keep-hint {
+  color: #1a5fb4;
+  font-size: 0.9rem;
+}
+
+.keep-banner {
+  margin: 8px 0 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  border: 1px solid #1a5fb4;
+  background: #eef5ff;
+  color: #1a5fb4;
+  font-size: 0.95rem;
+}
+
 .verify-status {
   font-size: 1.05rem;
   padding: 10px 14px;

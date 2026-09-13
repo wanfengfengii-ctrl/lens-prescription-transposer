@@ -18,6 +18,13 @@
 加工中心偶尔收到仅配单眼的处方，选择单眼后只校验并返回所选眼，
 另一眼缺失或空白均不参与；未传 scope 的旧请求仍按双眼契约解析，
 响应维持原结构（不含 scope 字段）。
+
+目标记法除 plus（正柱镜）、minus（负柱镜）外还支持 keep（保持原记法）：
+部分处方只需整理为设备录入单、无需统一柱镜符号，选择 keep 后各参与
+眼别一律保持输入数值与轴位原样输出（changed 为 False），不做任何
+转置，也就不存在转置后 S' 超界；两个物理方向的等价校核仍由整数域
+结果照常生成。未传新目标值的旧请求只可能携带 plus/minus，响应结构
+与取值完全不变。
 """
 from __future__ import annotations
 
@@ -35,7 +42,9 @@ PRISM_BASES = ("上", "下", "内", "外")
 
 TARGET_PLUS = "plus"
 TARGET_MINUS = "minus"
-VALID_TARGETS = (TARGET_PLUS, TARGET_MINUS)
+# 保持原记法：不统一柱镜符号，各眼数值与轴位原样输出
+TARGET_KEEP = "keep"
+VALID_TARGETS = (TARGET_PLUS, TARGET_MINUS, TARGET_KEEP)
 
 # 加工范围：双眼（默认）或仅单眼
 SCOPE_BOTH = "both"
@@ -250,9 +259,13 @@ class EyeTransposition:
 
 
 def transpose_eye(eye: EyeInput, target: str) -> EyeTransposition:
-    """单眼转置。C 为零或已符合目标符号时原样返回；S' 超界则拒绝。"""
+    """单眼转置。C 为零或已符合目标符号时原样返回；S' 超界则拒绝。
+
+    target == 'keep'（保持原记法）时一律原样返回：不做符号统一，
+    正、负柱镜的输入数值与轴位都保持不变（changed 为 False）。
+    """
     s_q, c_q, axis = eye.s_q, eye.c_q, eye.axis
-    if c_q == 0:
+    if c_q == 0 or target == TARGET_KEEP:
         return EyeTransposition(eye, s_q, c_q, axis, changed=False)
     if (target == TARGET_PLUS and c_q > 0) or (target == TARGET_MINUS and c_q < 0):
         return EyeTransposition(eye, s_q, c_q, axis, changed=False)
@@ -332,7 +345,9 @@ def _validate_and_transpose(raw: Any) -> tuple[str, str, dict[str, EyeTransposit
 
     target = raw.get("target")
     if target not in VALID_TARGETS:
-        raise PrescriptionError([f"target: 必须是 'plus' 或 'minus'，收到 {target!r}"])
+        raise PrescriptionError(
+            [f"target: 必须是 'plus'、'minus' 或 'keep'，收到 {target!r}"]
+        )
 
     scope = raw.get("scope", SCOPE_BOTH)
     if scope not in VALID_SCOPES:

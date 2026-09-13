@@ -987,3 +987,267 @@ describe("加工范围（单眼处方）", () => {
     expect(screen.queryByText("+3.00")).not.toBeInTheDocument();
   });
 });
+
+/** 保持原记法的后端响应：混合正负柱镜双眼，数值与轴位全部原样、changed 恒为 false */
+const BACKEND_OK_KEEP = {
+  target: "keep",
+  right: {
+    input: { S: "+1.00", C: "+2.00", A: 30 },
+    output: { S: "+1.00", C: "+2.00", A: 30 },
+    changed: false,
+    check: {
+      originalAxisDirection: { degrees: 30, original: "+1.00", transposed: "+1.00" },
+      perpendicularDirection: { degrees: 120, original: "+3.00", transposed: "+3.00" },
+      equivalent: true,
+    },
+  },
+  left: {
+    input: { S: "-1.25", C: "-0.50", A: 85 },
+    output: { S: "-1.25", C: "-0.50", A: 85 },
+    changed: false,
+    check: {
+      originalAxisDirection: { degrees: 85, original: "-1.25", transposed: "-1.25" },
+      perpendicularDirection: { degrees: 175, original: "-1.75", transposed: "-1.75" },
+      equivalent: true,
+    },
+  },
+};
+
+/** 保持原记法的单眼（仅右眼，含棱镜）响应 */
+const BACKEND_OK_KEEP_RIGHT_PRISM = {
+  target: "keep",
+  scope: "right",
+  right: {
+    ...BACKEND_OK_KEEP.right,
+    prism: { P: "+2.00", B: "外" },
+  },
+};
+
+describe("保持原记法", () => {
+  it("选择后随请求提交 target=keep，混合正负柱镜原样生成并标示未做符号转换", async () => {
+    fetchMock.mockResolvedValue(fakeResponse(200, BACKEND_OK_KEEP));
+    const user = userEvent.setup();
+    render(<App />);
+
+    // 下拉提供“保持原记法”，选中后表单旁即出现本次不转换的提示
+    const targetSelect = screen.getByLabelText("目标记法");
+    await user.selectOptions(targetSelect, "keep");
+    expect(screen.getByTestId("keep-hint")).toHaveTextContent("本次不做柱镜符号转换");
+
+    await fillAndSubmit(user);
+
+    // 请求携带 target=keep，不含 scope（双眼旧契约）
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({
+      target: "keep",
+      right: { S: "1.00", C: "2.00", A: "30" },
+      left: { S: "-1.25", C: "-0.50", A: "85" },
+    });
+
+    // 结果标题与横幅明确标示本次未做符号转换
+    const result = await screen.findByLabelText("核对结果");
+    expect(result).toHaveTextContent("核对结果（保持原记法）");
+    expect(screen.getByTestId("keep-banner")).toHaveTextContent("未做柱镜符号转换");
+
+    // 右眼（正柱镜）与左眼（负柱镜）输出均等于输入，changed=false。
+    // keep 下输入、输出与校核取值相同，故在原值/输出值表格内断言
+    const rightCard = screen.getByLabelText("右眼（OD）核对结果");
+    const rightValues = within(rightCard).getByLabelText("右眼（OD）原值与转置值");
+    expect(within(rightValues).getAllByText("+1.00")).toHaveLength(2);
+    expect(within(rightValues).getAllByText("+2.00")).toHaveLength(2);
+    expect(within(rightValues).getAllByText("30")).toHaveLength(2);
+    const leftCard = screen.getByLabelText("左眼（OS）核对结果");
+    const leftValues = within(leftCard).getByLabelText("左眼（OS）原值与转置值");
+    expect(within(leftValues).getAllByText("-0.50")).toHaveLength(2);
+    // 每只眼都标明保持原记法，且不出现统一记法下的“已符合目标记法”文案
+    expect(screen.getByTestId("keep-note-right")).toHaveTextContent(
+      "保持原记法，未做符号转换",
+    );
+    expect(screen.getByTestId("keep-note-left")).toHaveTextContent(
+      "保持原记法，未做符号转换",
+    );
+    expect(screen.queryByText("已符合目标记法，无需转置")).not.toBeInTheDocument();
+    // 等价校核仍由后端结果生成
+    expect(screen.getAllByText("等价校核：通过 ✓")).toHaveLength(2);
+
+    // 复制内容写明保持原记法，逐眼数值为原处方值
+    const order = screen.getByTestId("grinding-order");
+    expect(order).toHaveTextContent("目标记法：保持原记法（未做符号转换）");
+    expect(order).toHaveTextContent("OD（右眼） S +1.00 C +2.00 A 30");
+    expect(order).toHaveTextContent("OS（左眼） S -1.25 C -0.50 A 85");
+    expect(order).not.toHaveTextContent("C -2.00");
+  });
+
+  it("切回负柱镜记法后不再显示保持原记法提示，提交按 minus 统一符号", async () => {
+    fetchMock.mockResolvedValue(fakeResponse(200, BACKEND_OK_KEEP));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("目标记法"), "keep");
+    expect(screen.getByTestId("keep-hint")).toBeInTheDocument();
+    await fillAndSubmit(user);
+    await screen.findByTestId("keep-banner");
+
+    // 切回负柱镜：提示与旧结果一起清空
+    fetchMock.mockResolvedValue(fakeResponse(200, BACKEND_OK));
+    await user.selectOptions(screen.getByLabelText("目标记法"), "minus");
+    expect(screen.queryByTestId("keep-hint")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("keep-banner")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("核对结果")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+    const order = await screen.findByTestId("grinding-order");
+    expect(order).toHaveTextContent("目标记法：负柱镜");
+    expect(order).toHaveTextContent("OD（右眼） S +3.00 C -2.00 A 120");
+  });
+
+  it("切换目标记法会清空旧加工结果与复核结论，进行中的旧响应不能回填到新选择", async () => {
+    const pendingTranspose = deferred();
+    fetchMock.mockImplementationOnce((url: string) =>
+      url === "/api/v1/transpose"
+        ? pendingTranspose.promise
+        : Promise.resolve(fakeResponse(200, BACKEND_OK)),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    // 响应在途时切换为保持原记法：结果区立即清空
+    await user.selectOptions(screen.getByLabelText("目标记法"), "keep");
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("核对结果")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+
+    // 旧的负柱镜响应到达 → 必须丢弃，不能回填到“保持原记法”选择
+    await pendingTranspose.resolve(fakeResponse(200, BACKEND_OK));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("核对结果")).not.toBeInTheDocument();
+    expect(screen.queryByText("+3.00")).not.toBeInTheDocument();
+    expect(screen.getByTestId("keep-hint")).toBeInTheDocument();
+  });
+
+  it("已生成结果后切换目标记法：旧复核结论与设备录入一并清空", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, { match: true, differences: [] }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+    await fillEntryAndSubmit(user);
+    await screen.findByText("双眼录入全部吻合，可继续加工 ✓");
+
+    // 切到保持原记法：磨片参数、复核结论、设备录入全部清空
+    await user.selectOptions(screen.getByLabelText("目标记法"), "keep");
+    expect(screen.queryByText("双眼录入全部吻合，可继续加工 ✓")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+  });
+
+  it("单眼含棱镜处方保持原记法：原样生成并完成吻合复核", async () => {
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK_KEEP_RIGHT_PRISM));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, { match: true, differences: [] }));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("加工范围"), "right");
+    await user.selectOptions(screen.getByLabelText("目标记法"), "keep");
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "1.00");
+    await user.type(screen.getByLabelText("右眼 C（柱镜）"), "2.00");
+    await user.type(screen.getByLabelText("右眼 A（轴位）"), "30");
+    await fillMainPrism(user, "右眼", "2.00", "外");
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+
+    // 生成：数值/轴位/棱镜原样，磨片单写明保持原记法
+    const order = await screen.findByTestId("grinding-order");
+    expect(order).toHaveTextContent("目标记法：保持原记法（未做符号转换）");
+    expect(order).toHaveTextContent("OD（右眼） S +1.00 C +2.00 A 30 P +2.00 外");
+    expect(order).not.toHaveTextContent("OS（左眼）");
+    expect(screen.getByTestId("keep-note-right")).toBeInTheDocument();
+
+    // 转置请求为单眼 keep + 棱镜
+    const [, transposeInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(transposeInit.body))).toEqual({
+      target: "keep",
+      scope: "right",
+      right: { S: "1.00", C: "2.00", A: "30", P: "2.00", B: "外" },
+    });
+
+    // 复核：按原处方值（含棱镜）录入设备 → 右眼吻合
+    await user.type(screen.getByLabelText("复核右眼 S 球镜"), "+1.00");
+    await user.type(screen.getByLabelText("复核右眼 C 柱镜"), "+2.00");
+    await user.type(screen.getByLabelText("复核右眼 A 轴位"), "30");
+    await fillEntryPrism(user, "复核右眼", "2.00", "外");
+    await user.click(screen.getByRole("button", { name: "复核录入" }));
+    expect(
+      await screen.findByText("右眼录入全部吻合，可继续加工 ✓"),
+    ).toBeInTheDocument();
+
+    const [url, verifyInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/v1/verify-entry");
+    expect(JSON.parse(String(verifyInit.body))).toEqual({
+      prescription: {
+        target: "keep",
+        scope: "right",
+        right: { S: "1.00", C: "2.00", A: "30", P: "2.00", B: "外" },
+      },
+      entry: { right: { S: "+1.00", C: "+2.00", A: "30", P: "2.00", B: "外" } },
+    });
+  });
+
+  it("保持原记法下复核改错设备柱镜：差异标在该眼 C 字段旁", async () => {
+    const mismatchC = {
+      match: false,
+      differences: [{ eye: "right", field: "C", expected: "+2.00", entered: "+2.25" }],
+    };
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, BACKEND_OK_KEEP));
+    fetchMock.mockResolvedValueOnce(fakeResponse(200, mismatchC));
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("目标记法"), "keep");
+    await fillAndSubmit(user);
+    await screen.findByTestId("grinding-order");
+
+    // 设备柱镜误录为 +2.25（期望原处方 +2.00），其余正确
+    await user.type(screen.getByLabelText("复核右眼 S 球镜"), "+1.00");
+    await user.type(screen.getByLabelText("复核右眼 C 柱镜"), "+2.25");
+    await user.type(screen.getByLabelText("复核右眼 A 轴位"), "30");
+    await user.type(screen.getByLabelText("复核左眼 S 球镜"), "-1.25");
+    await user.type(screen.getByLabelText("复核左眼 C 柱镜"), "-0.50");
+    await user.type(screen.getByLabelText("复核左眼 A 轴位"), "85");
+    await user.click(screen.getByRole("button", { name: "复核录入" }));
+
+    expect(
+      await screen.findByText("复核不吻合：共 1 处差异，请核对上方标注字段"),
+    ).toBeInTheDocument();
+    const diff = screen.getByTestId("diff-right-C");
+    expect(diff).toHaveTextContent("不吻合：期望 +2.00，录入 +2.25");
+    expect(screen.queryByTestId("diff-right-S")).not.toBeInTheDocument();
+  });
+
+  it("保持原记法下非法处方仍整单拒绝并清除加工结果", async () => {
+    fetchMock.mockResolvedValue(
+      fakeResponse(422, { detail: ["右眼.S: 必须是 0.25 的整数倍，收到 '1.13'"] }),
+    );
+    const user = userEvent.setup();
+    render(<App />);
+
+    await user.selectOptions(screen.getByLabelText("目标记法"), "keep");
+    await user.type(screen.getByLabelText("右眼 S（球镜）"), "1.13");
+    await user.type(screen.getByLabelText("右眼 C（柱镜）"), "0.00");
+    await user.type(screen.getByLabelText("右眼 A（轴位）"), "0");
+    await user.type(screen.getByLabelText("左眼 S（球镜）"), "0.00");
+    await user.type(screen.getByLabelText("左眼 C（柱镜）"), "0.00");
+    await user.type(screen.getByLabelText("左眼 A（轴位）"), "0");
+    await user.click(screen.getByRole("button", { name: "核对并转置" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("处方被拒绝");
+    expect(screen.queryByLabelText("核对结果")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("grinding-order")).not.toBeInTheDocument();
+    // 复核区不开放
+    expect(screen.queryByLabelText("双眼录入复核")).not.toBeInTheDocument();
+  });
+});

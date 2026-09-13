@@ -1,4 +1,4 @@
-import { RejectionError, TransposeResponse, VerifyEntryResponse } from "./types";
+import { RejectionError, TargetNotation, TransposeResponse, VerifyEntryResponse } from "./types";
 
 export interface EyePayload {
   S: string;
@@ -11,7 +11,8 @@ export interface EyePayload {
 }
 
 export interface TransposeRequest {
-  target: "plus" | "minus";
+  /** 目标记法：plus 正柱镜 / minus 负柱镜 / keep 保持原记法（不转换符号） */
+  target: TargetNotation;
   /** 加工范围：仅单眼时携带（right/left）；双眼为默认值，不携带以保持旧契约 */
   scope?: "right" | "left";
   /** 双眼处方含两眼；单眼处方仅携带所选眼，另一眼不随请求发出 */

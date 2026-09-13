@@ -116,6 +116,45 @@ describe("transposePrescription", () => {
     expect(body).toEqual(req);
     expect(body).not.toHaveProperty("left");
   });
+
+  it("保持原记法：target=keep 原样发送，混合正负柱镜响应原样返回", async () => {
+    const keepResponse: TransposeResponse = {
+      target: "keep",
+      right: {
+        input: { S: "+1.00", C: "+2.00", A: 30 },
+        output: { S: "+1.00", C: "+2.00", A: 30 },
+        changed: false,
+        check: {
+          originalAxisDirection: { degrees: 30, original: "+1.00", transposed: "+1.00" },
+          perpendicularDirection: { degrees: 120, original: "+3.00", transposed: "+3.00" },
+          equivalent: true,
+        },
+      },
+      left: {
+        input: { S: "-1.25", C: "-0.50", A: 85 },
+        output: { S: "-1.25", C: "-0.50", A: 85 },
+        changed: false,
+        check: {
+          originalAxisDirection: { degrees: 85, original: "-1.25", transposed: "-1.25" },
+          perpendicularDirection: { degrees: 175, original: "-1.75", transposed: "-1.75" },
+          equivalent: true,
+        },
+      },
+    };
+    const fetchMock = vi.fn(async () => fakeResponse(200, keepResponse));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const req = {
+      target: "keep" as const,
+      right: { S: "1.00", C: "2.00", A: "30" },
+      left: { S: "-1.25", C: "-0.50", A: "85" },
+    };
+    const res = await transposePrescription(req);
+    expect(res).toEqual(keepResponse);
+    expect(res.target).toBe("keep");
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body)).target).toBe("keep");
+  });
 });
 
 describe("verifyEntry", () => {

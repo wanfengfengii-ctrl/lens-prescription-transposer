@@ -11,6 +11,7 @@ import {
   EyeResult,
   ProcessingScope,
   RejectionError,
+  TargetNotation,
   TransposeResponse,
   VerifyEntryResponse,
 } from "./types";
@@ -23,6 +24,13 @@ const SCOPE_LABELS: Record<ProcessingScope, string> = {
   left: "左眼",
 };
 
+/** 各目标记法在结果标题与磨片单中的中文标示 */
+const TARGET_LABELS: Record<TargetNotation, string> = {
+  minus: "负柱镜记法",
+  plus: "正柱镜记法",
+  keep: "保持原记法",
+};
+
 /** 组装单眼请求载荷：未填写（或已收起）的棱镜字段不随请求发出，保持旧契约形态 */
 function buildEyePayload(v: EyePayload): EyePayload {
   const out: EyePayload = { S: v.S, C: v.C, A: v.A };
@@ -33,7 +41,7 @@ function buildEyePayload(v: EyePayload): EyePayload {
 
 /** 按加工范围组装转置请求：双眼为默认值不携带 scope（旧契约），单眼只携带所选眼 */
 function buildTransposeRequest(
-  target: "minus" | "plus",
+  target: TargetNotation,
   scope: ProcessingScope,
   right: EyePayload,
   left: EyePayload,
@@ -63,7 +71,7 @@ function buildVerifyEntry(
 }
 
 export default function App() {
-  const [target, setTarget] = useState<"minus" | "plus">("minus");
+  const [target, setTarget] = useState<TargetNotation>("minus");
   // 加工范围：默认双眼；单眼处方只填写并提交所选眼
   const [scope, setScope] = useState<ProcessingScope>("both");
   const [right, setRight] = useState<EyePayload>({ ...EMPTY_EYE });
@@ -116,9 +124,16 @@ export default function App() {
     setVerifyRejection(null);
   }
 
-  const onTargetChange = (t: "minus" | "plus") => {
+  // 切换目标记法（含“保持原记法”）：旧加工结果与旧复核结论全部清空，
+  // 在途的旧请求因语境代号失效，返回后不能回填到新选择
+  const onTargetChange = (t: TargetNotation) => {
+    if (t === target) return;
     setTarget(t);
-    invalidatePrescriptionContext();
+    transposeCtx.current += 1;
+    resetVerifyContext();
+    setResult(null);
+    setLastRequest(null);
+    setRejection(null);
   };
   // 切换加工范围：不再适用的输入、已生成的加工值与复核结论全部清空；
   // 在途的旧请求因语境代号失效，返回后不能恢复这些内容
@@ -224,6 +239,8 @@ export default function App() {
         等科学计数法不予接受）；C 非零时轴位 A 取 1–180 的整数，C 为零时 A 必须为 0。
         任一眼不合规将整单拒绝，不输出任何加工参数。加工范围默认双眼；
         仅配单眼的处方可切换为仅右眼或仅左眼，此时只填写并核对所选眼。
+        目标记法除统一为正/负柱镜外，还可选择“保持原记法”：
+        不做柱镜符号转换，各眼数值与轴位原样整理为设备录入单。
         部分处方还带棱镜补偿：
         度数 0.00 至 10.00、步长 0.25，非零时须指定基底方向（上/下/内/外），
         零度不接受方向；棱镜不参与球柱镜换算，将原样携带进磨片参数。
@@ -248,11 +265,17 @@ export default function App() {
           <select
             id="target"
             value={target}
-            onChange={(e) => onTargetChange(e.target.value as "minus" | "plus")}
+            onChange={(e) => onTargetChange(e.target.value as TargetNotation)}
           >
             <option value="minus">负柱镜记法</option>
             <option value="plus">正柱镜记法</option>
+            <option value="keep">保持原记法（不转换符号）</option>
           </select>
+          {target === "keep" && (
+            <span className="keep-hint" data-testid="keep-hint">
+              本次不做柱镜符号转换，各眼数值与轴位原样整理为设备录入单
+            </span>
+          )}
         </div>
 
         <div className="eyes">
@@ -300,12 +323,29 @@ export default function App() {
       {result && (
         <Fragment>
           <section aria-label="核对结果" className="result">
-            <h2>
-              核对结果（{result.target === "minus" ? "负柱镜记法" : "正柱镜记法"}）
-            </h2>
+            <h2>核对结果（{TARGET_LABELS[result.target]}）</h2>
+            {result.target === "keep" && (
+              <p className="keep-banner" data-testid="keep-banner">
+                本次为保持原记法：未做柱镜符号转换，以下数值与轴位均与原处方一致
+              </p>
+            )}
             <div className="eyes">
-              {result.right && <EyeResultCard title="右眼（OD）" eye={result.right} />}
-              {result.left && <EyeResultCard title="左眼（OS）" eye={result.left} />}
+              {result.right && (
+                <EyeResultCard
+                  title="右眼（OD）"
+                  eyeKey="right"
+                  eye={result.right}
+                  target={result.target}
+                />
+              )}
+              {result.left && (
+                <EyeResultCard
+                  title="左眼（OS）"
+                  eyeKey="left"
+                  eye={result.left}
+                  target={result.target}
+                />
+              )}
             </div>
             <GrindingOrder result={result} />
           </section>
@@ -581,7 +621,17 @@ function VerifyEntrySection(props: {
   );
 }
 
-function EyeResultCard({ title, eye }: { title: string; eye: EyeResult }) {
+function EyeResultCard({
+  title,
+  eyeKey,
+  eye,
+  target,
+}: {
+  title: string;
+  eyeKey: "right" | "left";
+  eye: EyeResult;
+  target: TargetNotation;
+}) {
   return (
     <section className="eye-card" aria-label={`${title}核对结果`}>
       <h3>{title}</h3>
@@ -602,14 +652,20 @@ function EyeResultCard({ title, eye }: { title: string; eye: EyeResult }) {
             <td>{eye.input.A}</td>
           </tr>
           <tr>
-            <th scope="row">转置值</th>
+            <th scope="row">{target === "keep" ? "输出值（原样）" : "转置值"}</th>
             <td>{eye.output.S}</td>
             <td>{eye.output.C}</td>
             <td>{eye.output.A}</td>
           </tr>
         </tbody>
       </table>
-      {!eye.changed && <p className="unchanged">已符合目标记法，无需转置</p>}
+      {target === "keep" ? (
+        <p className="unchanged" data-testid={`keep-note-${eyeKey}`}>
+          保持原记法，未做符号转换
+        </p>
+      ) : (
+        !eye.changed && <p className="unchanged">已符合目标记法，无需转置</p>
+      )}
       {eye.prism && (
         <p className="prism-note">
           棱镜补偿：P {eye.prism.P}
@@ -659,7 +715,7 @@ function GrindingOrder({ result }: { result: TransposeResponse }) {
     }
     return line;
   };
-  const lines = [`目标记法：${result.target === "minus" ? "负柱镜" : "正柱镜"}`];
+  const lines = [`目标记法：${result.target === "keep" ? "保持原记法（未做符号转换）" : result.target === "minus" ? "负柱镜" : "正柱镜"}`];
   if (scope !== "both") {
     lines.push(`加工范围：仅${SCOPE_LABELS[scope]}（${scope === "right" ? "OD" : "OS"}）`);
   }
